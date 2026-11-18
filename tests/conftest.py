@@ -30,6 +30,7 @@ os.environ.update({
     "NOTES_DIR": str(_TMP / "notes"),
     "KIAROS_TOKEN": TOKEN,
     "KIAROS_BROWSER_HEADLESS": "1",
+    "OLLAMA_BACKUP": "0",  # never use a real local model in tests (test_ollama uses a fake one)
 })
 sys.path.insert(0, str(ROOT))
 
@@ -88,6 +89,7 @@ def live_server():
         # WhatsApp automation runs against a local stand-in page, headless — never your real WhatsApp.
         "KIAROS_WHATSAPP_URL": (ROOT / "tests" / "fixtures" / "whatsapp.html").as_uri(),
         "KIAROS_BROWSER_HEADLESS": "1",
+        "OLLAMA_BACKUP": "0",
         "PYTHONUNBUFFERED": "1",
     })
     log = open(data / "server.log", "w")

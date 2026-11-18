@@ -162,6 +162,16 @@ Advanced options in `.env`:
 | `KIAROS_TOKEN` | generated | Phone pairing token. Delete it and restart to unpair every device. |
 | `KIAROS_DATA_DIR` | `./data` | Memory, conversation, reports |
 
+### Offline backup (no limits)
+
+Cloud AI keys have limits (Gemini's free tier allows 20 requests a day per model). Install a local model as a backup and KIAROS keeps working when the cloud runs out, or when you're offline:
+
+```bash
+scripts/install-ollama.sh            # installs Ollama for your user (no sudo) + the qwen2.5:3b model (~2 GB)
+```
+
+KIAROS then uses your cloud key normally and switches to the local model automatically, saying so once, when the cloud is out of quota, overloaded or unreachable. It switches back when the quota resets. The local model is free and private, with no quota, but on a laptop CPU it's slower and simpler. A bigger model (e.g. `scripts/install-ollama.sh qwen2.5:7b`, then `OLLAMA_MODEL=qwen2.5:7b` in `.env`) is smarter if you have 8 GB+ RAM free. With no cloud key at all, KIAROS runs fully on the local model.
+
 **Optional laptop extras:** `sudo apt install gnome-screenshot` lets KIAROS see your screen. Install the [Claude Code CLI](https://code.claude.com/docs) for "build me…" and project commands.
 
 ---
@@ -217,7 +227,7 @@ Tests that need a live Anthropic key or open internet skip themselves when those
 | Part | Where |
 |---|---|
 | Server, voice loop, actions, sync | `server.py` |
-| AI providers (Gemini, Claude) | `llm.py`, `llm_gemini.py` |
+| AI providers (Gemini, Claude, local Ollama backup) | `llm.py`, `llm_gemini.py`, `llm_ollama.py` |
 | Laptop controls (allowlist) | `system_control.py` |
 | Terminal / browser / Claude Code | `actions.py` |
 | Calendar · email · notes · screen | `calendar_access.py` · `mail_access.py` · `notes_access.py` · `screen.py` |

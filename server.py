@@ -195,6 +195,31 @@ KNOWN PROJECTS:
 """
 
 
+# Short instructions for the small offline model (a 3B model on CPU reads ~3,000-token
+# prompts slowly and follows short ones better). Same personality, the essential actions.
+LOCAL_SYSTEM_PROMPT = """\
+You are KIAROS, {user_name}'s voice assistant on their Linux laptop and Android phone. Calm, precise, brief.
+Reply in ONE or TWO short spoken sentences. No markdown, no lists. Address the user as "{honorific}" occasionally.
+Time: {current_time}. {device_context}
+
+When the user wants something DONE, end your reply with exactly one tag:
+[ACTION:SYSTEM] command ||| arg   — laptop: volume_up, volume_down, volume_set, mute, unmute, play_pause, next,
+                                    previous, open_app (arg: app name), open_folder, lock, battery, status
+[ACTION:PHONE] call|sms|whatsapp|navigate ||| contact or number ||| message
+[ACTION:TIMER] seconds ||| label
+[ACTION:BROWSE] url or search query
+[ACTION:TASK] goal               — anything with several steps, websites, files or commands
+[ACTION:REMEMBER] fact
+[ACTION:ADD_TASK] priority ||| title ||| description ||| due date
+[ACTION:CREATE_NOTE] title ||| body
+Examples: "open spotify" → Opening Spotify. [ACTION:SYSTEM] open_app ||| spotify
+"remind me in 10 minutes to stretch" → Will do. [ACTION:TIMER] 600 ||| stretch
+Never claim you did something unless you used a tag. For plain questions, just answer.
+
+What you know about the user:
+{memory}
+"""
+
 # ---------------------------------------------------------------------------
 # Data Models
 # ---------------------------------------------------------------------------
@@ -1102,6 +1127,9 @@ async def synthesize_speech(text: str) -> Optional[bytes]:
 # LLM Response
 # ---------------------------------------------------------------------------
 
+_backup_state = {"announced": False}
+
+
 async def generate_response(
     text: str,
     client: anthropic.AsyncAnthropic,
@@ -1149,10 +1177,23 @@ async def generate_response(
     while messages and messages[0]["role"] != "user":
         messages = messages[1:]
 
+    local_system = LOCAL_SYSTEM_PROMPT.format(
+        user_name=USER_NAME or "the user", honorific=HONORIFIC or "by name", current_time=current_time,
+        device_context=device_context or "The user is on their laptop.", memory=memory_ctx or "Nothing yet.",
+    )
     try:
-        response = await llm.fast(client, messages, system=system, max_tokens=1024)
+        response = await llm.fast(client, messages, system=system, max_tokens=1024, backup_system=local_system)
         track_usage(response)
-        return llm.text_of(response) or "I didn't catch a usable answer there. Could you say that again?"
+        text = llm.text_of(response) or "I didn't catch a usable answer there. Could you say that again?"
+        # Say once when we switch to (or back from) the offline model.
+        on_backup = bool(getattr(response, "via_backup", False))
+        if on_backup and not _backup_state["announced"] and llm.provider_of(client) != "ollama":
+            _backup_state["announced"] = True
+            text = ("My cloud AI is unavailable right now, so I'm using my offline brain on this laptop; "
+                    "it's slower and simpler. " + text)
+        elif not on_backup:
+            _backup_state["announced"] = False
+        return text
     except llm.AUTH_ERRORS:
         return "My API key was rejected. Please check it in settings."
     except llm.BUSY_ERRORS as e:
@@ -2255,7 +2296,8 @@ class PreferencesUpdate(BaseModel):
 
 
 SETTABLE_KEYS = {
-    "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LLM_PROVIDER", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC",
+    "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LLM_PROVIDER", "OLLAMA_MODEL", "OLLAMA_BACKUP",
+    "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC",
     "CALENDAR_ICS_URLS", "MAIL_IMAP_HOST", "MAIL_ADDRESS", "MAIL_APP_PASSWORD",
     "NOTES_DIR", "WEATHER_LOCATION",
 }
@@ -2264,7 +2306,10 @@ SETTABLE_KEYS = {
 def _apply_runtime(key: str, value: str):
     """Make a saved setting take effect without restarting."""
     global anthropic_client, ANTHROPIC_API_KEY, FISH_API_KEY, FISH_VOICE_ID, USER_NAME, HONORIFIC
-    if key in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LLM_PROVIDER"):
+    if key in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LLM_PROVIDER", "OLLAMA_MODEL", "OLLAMA_BACKUP"):
+        if key == "OLLAMA_MODEL" and value:
+            import llm_ollama
+            llm_ollama.OLLAMA_MODEL = value
         if key == "ANTHROPIC_API_KEY":
             ANTHROPIC_API_KEY = value
         os.environ[key] = value
