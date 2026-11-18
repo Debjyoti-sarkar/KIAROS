@@ -43,6 +43,7 @@ from pydantic import BaseModel
 
 import auth
 import llm
+import llm_ollama
 import system_control
 from actions import (
     open_terminal, open_browser, open_path, open_claude_in_project, run_claude_visible,
@@ -200,7 +201,6 @@ KNOWN PROJECTS:
 LOCAL_SYSTEM_PROMPT = """\
 You are KIAROS, {user_name}'s voice assistant on their Linux laptop and Android phone. Calm, precise, brief.
 Reply in ONE or TWO short spoken sentences. No markdown, no lists. Address the user as "{honorific}" occasionally.
-Time: {current_time}. {device_context}
 
 When the user wants something DONE, end your reply with exactly one tag:
 [ACTION:SYSTEM] command ||| arg   — laptop: volume_up, volume_down, volume_set, mute, unmute, play_pause, next,
@@ -215,10 +215,18 @@ When the user wants something DONE, end your reply with exactly one tag:
 Examples: "open spotify" → Opening Spotify. [ACTION:SYSTEM] open_app ||| spotify
 "remind me in 10 minutes to stretch" → Will do. [ACTION:TIMER] 600 ||| stretch
 Never claim you did something unless you used a tag. For plain questions, just answer.
+"""
 
+# Changing details go after the fixed instructions so the local model can reuse its cached prompt.
+LOCAL_CONTEXT = """
+Time: {current_time}. {device_context}
 What you know about the user:
 {memory}
 """
+
+
+def local_prompt_static() -> str:
+    return LOCAL_SYSTEM_PROMPT.format(user_name=USER_NAME or "the user", honorific=HONORIFIC or "by name")
 
 # ---------------------------------------------------------------------------
 # Data Models
@@ -1027,6 +1035,13 @@ task_agent = TaskAgent({"phone": _agent_phone, "timer": _agent_timer, "note": cr
 _agent_running = {"busy": False}
 
 
+def _offline_failure_message() -> str:
+    """Why neither brain answered, in words the user can act on."""
+    reason = getattr(anthropic_client, "switch_reason", "") or "My cloud AI is unavailable"
+    return (f"{reason.rstrip('.')}, and my offline brain on this laptop didn't answer in time. "
+            "Ask me again in a moment; laptop controls, calls and messages still work.")
+
+
 async def _run_agent(goal: str, ws, history: list | None = None, resume: bool | None = None, cont: bool = False):
     """Run (or resume) a task in the background and speak the outcome."""
     if _agent_running["busy"]:
@@ -1050,6 +1065,9 @@ async def _run_agent(goal: str, ws, history: list | None = None, resume: bool | 
         result = str(e) if isinstance(e, GeminiQuotaError) else "Google's AI servers are overloaded, so I couldn't finish that. Try again shortly."
     except llm.AUTH_ERRORS:
         result = "My API key was rejected, so I couldn't do that task."
+    except llm_ollama.OllamaError as e:
+        log.error(f"Task failed on the local model: {e}")
+        result = _offline_failure_message()
     except Exception as e:
         log.error(f"Task failed: {e}", exc_info=True)
         result = f"That task ran into a problem: {str(e)[:120]}"
@@ -1177,8 +1195,8 @@ async def generate_response(
     while messages and messages[0]["role"] != "user":
         messages = messages[1:]
 
-    local_system = LOCAL_SYSTEM_PROMPT.format(
-        user_name=USER_NAME or "the user", honorific=HONORIFIC or "by name", current_time=current_time,
+    local_system = local_prompt_static() + LOCAL_CONTEXT.format(
+        current_time=current_time,
         device_context=device_context or "The user is on their laptop.", memory=memory_ctx or "Nothing yet.",
     )
     try:
@@ -1205,9 +1223,12 @@ async def generate_response(
         return "Google's AI servers are overloaded this moment. Ask me again in a few seconds."
     except anthropic.APIConnectionError:
         return "I can't reach my language model. Is the laptop online?"
+    except llm_ollama.OllamaError as e:
+        log.error(f"Local model failed: {e}")
+        return _offline_failure_message()
     except Exception as e:
-        log.error(f"LLM error: {type(e).__name__}: {e}")
-        return "I'm having trouble with my language systems right now."
+        log.error(f"LLM error: {type(e).__name__}: {e}", exc_info=True)
+        return f"My AI request failed ({type(e).__name__}). Ask me again; laptop controls, calls and messages still work."
 
 
 # ---------------------------------------------------------------------------
@@ -1377,6 +1398,15 @@ async def _refresh_context_async():
         await asyncio.sleep(300)
 
 
+async def _prewarm_local():
+    """Have the local model read its fixed prompts once, so a later fallback answers in seconds."""
+    from agent import SYSTEM as AGENT_SYSTEM, TOOLS as AGENT_TOOLS
+    backup = llm_ollama.backup_of(anthropic_client)
+    if backup:
+        await backup.prewarm(local_prompt_static())
+        await backup.prewarm(AGENT_SYSTEM, AGENT_TOOLS)
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global anthropic_client, cached_projects
@@ -1385,6 +1415,7 @@ async def lifespan(application: FastAPI):
     if anthropic_client:
         log.info(f"AI provider: {llm.active_provider()}")
         asyncio.create_task(llm.warm_up(anthropic_client))
+        asyncio.create_task(_prewarm_local())
     else:
         log.warning("No AI key set (GEMINI_API_KEY or ANTHROPIC_API_KEY) — add one in settings")
     cached_projects = []
