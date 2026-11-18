@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8
+pytest-asyncio>=0.23
+playwright>=1.40   # UI tests drive your installed Google Chrome (no browser download needed)
+pyflakes>=3

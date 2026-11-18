@@ -16,11 +16,12 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+from paths import DATA_DIR, ENV_FILE  # noqa: F401
 
 log = logging.getLogger("kiaros.ab_testing")
 
 TEMPLATES_DIR = Path(__file__).parent / "templates" / "prompts"
-DB_PATH = Path(__file__).parent / "kiaros_data.db"
+DB_PATH = DATA_DIR / "kiaros_data.db"
 
 # Minimum tasks per version before declaring a winner
 MIN_TASKS_FOR_WINNER = 20

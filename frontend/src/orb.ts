@@ -21,7 +21,8 @@ export function createOrb(canvas: HTMLCanvasElement): Orb {
   const N = 2000;
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
+  // 2x is indistinguishable on phones and saves a lot of GPU/battery on 3x screens.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setClearColor(0x050508, 1);
 

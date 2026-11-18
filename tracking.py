@@ -9,10 +9,11 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from paths import DATA_DIR, ENV_FILE  # noqa: F401
 
 log = logging.getLogger("kiaros.tracking")
 
-DB_PATH = Path(__file__).parent / "kiaros_data.db"
+DB_PATH = DATA_DIR / "kiaros_data.db"
 
 
 class SuccessTracker:
@@ -20,6 +21,7 @@ class SuccessTracker:
 
     def __init__(self, db_path: str = None):
         self.db_path = db_path or str(DB_PATH)
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self._create_tables()

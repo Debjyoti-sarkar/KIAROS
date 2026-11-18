@@ -160,15 +160,26 @@ async def test_browser_research(browser):
 # ── Action Detection ─────────────────────────────────────────────────
 
 
-def test_browse_action_keywords():
-    """Action keywords include browse-related terms."""
-    from server import ACTION_KEYWORDS
+def test_browse_routing(monkeypatch):
+    """URLs open directly, everything else becomes a search, and URLs never match an app."""
+    import server
+    opened = []
 
-    assert "browse" in ACTION_KEYWORDS
-    browse_keywords = ACTION_KEYWORDS["browse"]
-    assert "search for" in browse_keywords
-    assert "look up" in browse_keywords
-    assert "google" in browse_keywords
+    async def fake_open(url, browser="default"):
+        opened.append(url)
+        return {"success": True, "confirmation": ""}
+
+    monkeypatch.setattr(server, "open_browser", fake_open)
+    asyncio.run(server._execute_browse("github.com"))
+    asyncio.run(server._execute_browse("https://example.com/a?b=1"))
+    asyncio.run(server._execute_browse("best biryani near me"))
+    assert opened == [
+        "https://github.com",
+        "https://example.com/a?b=1",
+        "https://www.google.com/search?q=best%20biryani%20near%20me",
+    ]
+    assert server.detect_system_command("open google.com", "laptop") is None
+    assert server.detect_system_command("open youtube.com on my laptop", "laptop") is None
 
 
 # ── Browser Lifecycle ─────────────────────────────────────────────────

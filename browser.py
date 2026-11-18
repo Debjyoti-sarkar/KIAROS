@@ -7,6 +7,7 @@ Runs headless Chromium with realistic user agent to avoid blocking.
 
 import asyncio
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -77,13 +78,18 @@ class KiarosBrowser:
         from playwright.async_api import async_playwright
 
         self._pw = await async_playwright().start()
-        # Launch VISIBLE browser so user can watch KIAROS browse
-        self._browser = await self._pw.chromium.launch(headless=False)
+        # Visible by default so the user can watch KIAROS browse; tests set KIAROS_BROWSER_HEADLESS=1.
+        headless = os.getenv("KIAROS_BROWSER_HEADLESS", "") == "1"
+        try:
+            self._browser = await self._pw.chromium.launch(headless=headless)
+        except Exception:
+            # Playwright's own Chromium isn't downloaded — use the installed Google Chrome.
+            self._browser = await self._pw.chromium.launch(headless=headless, channel="chrome")
         self._context = await self._browser.new_context(
             user_agent=USER_AGENT,
             viewport={"width": 1280, "height": 900},
         )
-        log.info("Browser launched (visible Chromium)")
+        log.info(f"Browser launched ({'headless' if headless else 'visible'})")
 
     async def _new_page(self):
         """Create a new page in the browser context."""

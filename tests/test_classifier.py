@@ -103,3 +103,21 @@ async def run_tests():
 
 if __name__ == "__main__":
     asyncio.run(run_tests())
+
+
+# ---------------------------------------------------------------------------
+# pytest entry point (live API; skipped when no key is configured)
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("ANTHROPIC_API_KEY"), reason="needs ANTHROPIC_API_KEY (live model)")
+async def test_classifier_accuracy():
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    hits = 0
+    for text, expected in TEST_CASES:
+        result = await classify_intent(apply_speech_corrections(text), client)
+        hits += result["action"] == expected
+    assert hits >= 0.85 * len(TEST_CASES), f"only {hits}/{len(TEST_CASES)} classified correctly"

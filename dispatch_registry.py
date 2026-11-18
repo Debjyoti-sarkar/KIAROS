@@ -9,10 +9,11 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
+from paths import DATA_DIR, ENV_FILE  # noqa: F401
 
 log = logging.getLogger("kiaros.dispatch")
 
-DB_PATH = Path(__file__).parent / "data" / "kiaros.db"
+DB_PATH = DATA_DIR / "kiaros.db"
 
 
 def _get_db() -> sqlite3.Connection:

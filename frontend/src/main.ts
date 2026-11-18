@@ -41,10 +41,17 @@ function showError(msg: string) {
   setTimeout(() => (errorEl.style.opacity = "0"), 6000);
 }
 
-function caption(who: "you" | "kiaros", text: string) {
+function caption(who: "you" | "kiaros", text: string, fromDevice = "") {
   const line = document.createElement("div");
   line.className = `caption caption-${who}`;
   line.textContent = text;
+  if (fromDevice && fromDevice !== DEVICE) {
+    // Said on another device — show where it came from.
+    const tag = document.createElement("span");
+    tag.className = "caption-device";
+    tag.textContent = fromDevice === "phone" ? "on phone" : "on laptop";
+    line.prepend(tag);
+  }
   captionsEl.appendChild(line);
   while (captionsEl.children.length > 4) captionsEl.firstChild?.remove();
 }
@@ -242,6 +249,24 @@ socket.onMessage(async (msg) => {
     } else if (state === "idle" && currentState !== "speaking") transition("idle");
   } else if (type === "device_action") {
     handleDeviceAction(msg);
+  } else if (type === "sync") {
+    // A turn happening on another device: mirror it silently.
+    caption(msg.role === "user" ? "you" : "kiaros", String(msg.text || ""), String(msg.device || ""));
+  } else if (type === "history") {
+    captionsEl.innerHTML = "";
+    for (const m of (msg.messages as { role: string; text: string; device: string }[]) || []) {
+      caption(m.role === "user" ? "you" : "kiaros", m.text, m.device);
+    }
+    captionsEl.classList.add("restored");
+  } else if (type === "presence") {
+    const devices = (msg.devices as { device: string }[]) || [];
+    for (const kind of ["laptop", "phone"]) {
+      const n = devices.filter((d) => d.device === kind).length;
+      const el = $(`dev-${kind}`);
+      el.classList.toggle("online", n > 0);
+      el.classList.toggle("self", kind === DEVICE);
+      el.title = `${kind[0].toUpperCase() + kind.slice(1)}: ${n > 0 ? "connected" : "offline"}`;
+    }
   } else if (type === "task_complete" || type === "qa_result" || type === "suggestion") {
     console.log("[task]", msg);
   }
@@ -349,6 +374,8 @@ if (!isNative) $("btn-connection").style.display = "none";
 // ---------------------------------------------------------------------------
 // Kick off
 // ---------------------------------------------------------------------------
+
+updateStatus(currentState); // show "tap to talk" on phones right away
 
 if (!isConfigured()) {
   showConnectScreen("Enter the address and token shown on your laptop (KIAROS menu → Pair phone).");

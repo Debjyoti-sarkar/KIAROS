@@ -18,10 +18,11 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from paths import DATA_DIR, ENV_FILE  # noqa: F401
 
 log = logging.getLogger("kiaros.memory")
 
-DB_PATH = Path(__file__).parent / "data" / "kiaros.db"
+DB_PATH = DATA_DIR / "kiaros.db"
 
 
 def _get_db() -> sqlite3.Connection:
@@ -472,12 +473,14 @@ def save_contact(name: str, phone: str) -> None:
     conn.close()
 
 
-def find_contact(query: str) -> dict | None:
-    """Look up a contact by exact, then partial, name match."""
+def find_contact(query: str, exact: bool = False) -> dict | None:
+    """Look up a contact by exact (case-insensitive) name, then by partial match unless exact=True."""
     q = query.strip()
+    if not q:
+        return None
     conn = _get_db()
     row = conn.execute("SELECT name, phone FROM contacts WHERE name = ?", (q,)).fetchone()
-    if not row:
+    if not row and not exact:
         row = conn.execute("SELECT name, phone FROM contacts WHERE name LIKE ? ORDER BY length(name) LIMIT 1",
                            (f"%{q}%",)).fetchone()
     conn.close()
