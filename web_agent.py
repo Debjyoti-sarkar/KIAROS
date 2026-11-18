@@ -127,6 +127,21 @@ class WebAgent:
                 continue
         raise ValueError(f"Couldn't find '{target}' on the page.")
 
+    async def describe(self, target: str) -> dict:
+        """What an element is: {'label', 'kind', 'password'} — used for safety checks before acting."""
+        try:
+            el = await self._locate(target)
+            return await el.evaluate("""e => ({
+                label: (e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || e.value ||
+                        e.getAttribute('placeholder') || '').trim().slice(0, 120),
+                kind: e.tagName.toLowerCase() + (e.type ? ':' + e.type : ''),
+                password: e.type === 'password' || /password|passcode|\bpin\b|otp/i.test(
+                    (e.getAttribute('autocomplete') || '') + ' ' + (e.getAttribute('name') || '') + ' ' +
+                    (e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('placeholder') || '')),
+            })""")
+        except Exception:
+            return {"label": str(target), "kind": "", "password": False}
+
     async def click(self, target: str) -> str:
         async with self._lock:
             el = await self._locate(target)
@@ -168,15 +183,28 @@ class WebAgent:
             await page.wait_for_timeout(500)
         return "loading"
 
-    async def whatsapp_send(self, contact: str, message: str) -> str:
+    async def whatsapp_send(self, contact: str, message: str, on_wait=None, login_wait: float = 180) -> str:
         async with self._lock:
             page = await self.page()
             status = await self.whatsapp_status()
             await page.bring_to_front()
             if status == "login":
-                return ("NEEDS_LOGIN: WhatsApp Web isn't linked yet. On your phone open WhatsApp → Settings → "
-                        "Linked devices → Link a device, and scan the QR code in the KIAROS browser window. "
-                        "Then ask me again.")
+                # Wait for the user to link WhatsApp instead of giving up, then carry on by ourselves.
+                if on_wait:
+                    await on_wait("WhatsApp Web needs linking once. On your phone open WhatsApp, Settings, Linked "
+                                  "devices, Link a device, and scan the code in the KIAROS browser. I'll carry on "
+                                  "as soon as you do.")
+                ready = page.locator('#pane-side, [aria-label="Chat list"], [data-testid="chat-list"]')
+                for _ in range(int(login_wait * 2)):
+                    if await ready.count():
+                        status = "ready"
+                        await page.wait_for_timeout(3000)  # let chats sync after linking
+                        break
+                    await page.wait_for_timeout(500)
+                else:
+                    return ("NEEDS_LOGIN: WhatsApp Web isn't linked yet. On your phone open WhatsApp → Settings → "
+                            "Linked devices → Link a device, and scan the QR code in the KIAROS browser window. "
+                            "Then say continue.")
             if status != "ready":
                 return "WhatsApp Web didn't finish loading. Check the internet connection and try again."
 

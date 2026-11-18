@@ -5,18 +5,22 @@ The model plans and calls tools (apps, system controls, shell, files, a
 browser KIAROS drives, WhatsApp Web, phone actions, timers, notes) in a loop
 until the goal is done, then reports in one or two spoken sentences.
 
-Safety is enforced here, not by the model:
-  - sending messages, non-read-only shell commands, overwriting files and
-    power actions pause the task and wait for the user's spoken "yes";
-  - sudo / destructive system commands are refused outright.
-A paused task is resumed (or cancelled) by the next thing the user says.
+It works autonomously and stops only for MAJOR permissions (enforced here,
+not by the model):
+  - deleting files, overwriting existing files, killing processes, pushing or
+    resetting git, changing system services, piping internet scripts to a shell;
+  - payments / orders / account deletion and similar irreversible website clicks;
+  - messaging someone the user didn't name in their request;
+  - shutdown / restart / suspend / logout.
+sudo and disk-destroying commands are refused outright. When a step needs the
+user to act (scan a QR code, type a password), the agent waits or pauses and
+continues by itself when the user says "continue".
 """
 
 import asyncio
 import logging
 import os
 import re
-import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,7 +29,7 @@ import llm
 
 log = logging.getLogger("kiaros.agent")
 
-MAX_STEPS = 15
+MAX_STEPS = 30
 HOME = Path.home()
 
 SYSTEM = """You are KIAROS's task engine on the user's Linux laptop (Ubuntu, GNOME, Wayland). You carry out the
@@ -40,50 +44,69 @@ How to work:
   the way the user would send it (first person, natural, correct punctuation) — e.g. "send Somesh that how was he"
   means a message like "How was it?" or "How are you doing?" only if clearly intended; otherwise keep their words.
 - Use run_command for files, system info, git, installs that don't need sudo. Never use sudo.
-- If a tool reports NEEDS_LOGIN or NEEDS_CONFIRMATION, stop and tell the user exactly what is needed.
+- You are autonomous: finish the whole job without asking the user questions. Pick sensible defaults yourself.
+  The system itself will pause for the user's permission on major or irreversible steps — just call the tool.
+- If a tool reports NEEDS_USER or NEEDS_LOGIN, stop and tell the user exactly what to do; you'll be resumed after.
+- Verify your work (e.g. re-read the page, list the folder) before saying it's done.
 - If you get stuck after a few attempts, say what blocked you. Never claim something happened unless a tool
   result confirms it.
 - Final reply: plain speech, no markdown, no lists, at most two sentences."""
 
-# Commands that only read state — run without asking.
-_READ_ONLY = {
-    "ls", "cat", "head", "tail", "wc", "df", "du", "free", "uptime", "date", "whoami", "uname", "ps", "pwd",
-    "which", "whereis", "file", "stat", "find", "grep", "rg", "echo", "lsblk", "lscpu", "lsusb", "hostname",
-    "env", "printenv", "id", "groups", "cal", "nproc", "sensors", "tree", "realpath", "basename", "dirname",
-    "sort", "uniq", "cut", "awk", "sed", "less", "more", "diff", "md5sum", "sha256sum", "xdg-user-dir",
-}
-_READ_ONLY_SUB = {"git": {"status", "log", "diff", "branch", "show", "remote"},
-                  "systemctl": {"status", "list-units", "is-active"}, "nmcli": {"general", "device", "connection"},
-                  "ip": {"addr", "a", "route", "link"}, "pip": {"list", "show"}, "npm": {"ls", "list"},
-                  "apt": {"list", "show", "search"}, "snap": {"list"}, "flatpak": {"list"}}
-_FORBIDDEN = re.compile(r"(^|[\s;&|])(sudo|su|mkfs\S*|fdisk|parted|shred|dd)(\s|$)|rm\s+-[a-z]*r[a-z]*f?\s+(/|~|\$HOME)(\s|$)|:\(\)\s*\{", re.I)
+_FORBIDDEN = re.compile(
+    r"(^|[\s;&|(])(sudo|su|pkexec|doas|mkfs\S*|fdisk|sfdisk|parted|wipefs|shred|dd)(\s|$)"
+    r"|rm\s+(-\S*\s+)*(/|~/?|\$HOME/?|/home/?\S*|/\*)(\s|$)"      # rm on / or the whole home folder
+    r"|:\(\)\s*\{|>\s*/dev/sd|chmod\s+-R\s+\S+\s+/(\s|$)", re.I)
+
+# Major (irreversible or system-changing) — the user is asked first. Everything else just runs.
+_MAJOR = [
+    r"(^|[\s;&|(])(rm|rmdir|unlink|trash|gio\s+trash)\s",                 # deleting
+    r"(^|[\s;&|(])(kill|pkill|killall|xkill)\s",                          # killing processes
+    r"(^|[\s;&|(])(shutdown|reboot|poweroff|halt|systemctl\s+(poweroff|reboot|suspend|hibernate))\b",
+    r"systemctl\s+(--user\s+)?(stop|disable|mask|restart|enable)\s",
+    r"\bgit\s+(push|reset\s+--hard|clean\s+-\S*f|checkout\s+--\s|restore|rebase|branch\s+-D|stash\s+(drop|clear))",
+    r"(curl|wget)\s[^|]*\|\s*(ba|z|)sh\b",                                # piping internet scripts to a shell
+    r"\bfind\b.*\s-(delete|exec\s+rm)",
+    r"\bsed\s+-i\b.*\s(~/\.|/home/\S+/\.|/etc/)",                        # editing dotfiles / system config in place
+    r">\s*(~/\.|\$HOME/\.|/home/\S+/\.|/etc/)",                            # overwriting dotfiles / system config
+    r"\bcrontab\s+-r\b|\bchmod\s+-R\b|\bchown\s+-R\b",
+    r"\b(docker|podman)\s+(rm|rmi|system\s+prune|volume\s+rm)\b",
+    r"\btruncate\s",
+    r"\bmv\s",                                                               # moving/renaming can overwrite files
+]
 
 
 def classify_command(cmd: str) -> str:
-    """'forbidden', 'read' (safe to run) or 'confirm'."""
+    """'forbidden', 'major' (ask the user first) or 'ok' (just run it)."""
     if _FORBIDDEN.search(cmd):
         return "forbidden"
-    if re.search(r"[><`]|\$\(|&&|\|\||;", cmd):
-        return "confirm"
-    for segment in cmd.split("|"):
-        try:
-            words = shlex.split(segment)
-        except ValueError:
-            return "confirm"
-        if not words:
-            return "confirm"
-        head = os.path.basename(words[0])
-        if head in _READ_ONLY:
-            if head == "sed" and any(w.startswith("-i") for w in words):
-                return "confirm"
-            if head == "find" and any(w in ("-delete", "-exec", "-execdir") for w in words):
-                return "confirm"
-            continue
-        subs = _READ_ONLY_SUB.get(head)
-        if subs and len(words) > 1 and words[1] in subs:
-            continue
-        return "confirm"
-    return "read"
+    if any(re.search(p, cmd, re.I) for p in _MAJOR):
+        return "major"
+    # "> file" replaces an existing file's contents (">>" appends, which is fine).
+    for target in re.findall(r"(?<![>&\d])>(?!>)\s*([^\s;&|]+)", cmd):
+        path = Path(os.path.expanduser(target.strip("'\""))) if not target.startswith("/") else Path(target)
+        if not path.is_absolute():
+            path = HOME / path
+        if path.exists() and path.stat().st_size > 0 and str(path) != "/dev/null":
+            return "major"
+    return "ok"
+
+
+# Website clicks that spend money or can't be undone.
+_MAJOR_CLICK = re.compile(
+    r"\b(pay|payment|buy|purchase|place (your )?order|checkout|confirm (order|booking|purchase)|book now|"
+    r"subscribe|donate|transfer|send money|delete|remove account|deactivate|close account|unsubscribe all|"
+    r"submit (application|payment)|sign contract|accept and pay)\b", re.I)
+
+
+def _named_in(name: str, text: str) -> bool:
+    """Did the user's own request mention this person/contact?"""
+    name, text = (name or "").lower().strip(), (text or "").lower()
+    if not name:
+        return False
+    if name in text:
+        return True
+    first = re.split(r"\s+", name)[0]
+    return len(first) >= 3 and re.search(rf"\b{re.escape(first)}\b", text) is not None
 
 
 def _tool(name, description, props=None, required=None):
@@ -143,20 +166,32 @@ class TaskAgent:
         note(title, body), progress(ws, text)."""
         self.hooks = hooks
         self.pending: Pending | None = None
+        self.waiting: dict | None = None  # paused because the user must act (login, password)
 
     # -- tool execution -----------------------------------------------------
 
-    def _needs_confirmation(self, name: str, args: dict) -> str | None:
-        if name == "whatsapp_send":
-            return f"Send \"{args.get('message', '')}\" to {args.get('contact', '')} on WhatsApp?"
-        if name == "phone_action" and str(args.get("action", "")).lower() in ("sms", "whatsapp"):
-            return f"Send \"{args.get('message', '')}\" to {args.get('target', '')} from your phone?"
-        if name == "run_command" and classify_command(args.get("command", "")) == "confirm":
-            return f"Run this on the laptop: {args.get('command', '')}?"
-        if name == "write_file" and Path(os.path.expanduser(args.get("path", ""))).exists():
-            return f"Overwrite {args.get('path')}?"
+    async def _needs_confirmation(self, name: str, args: dict, goal: str) -> str | None:
+        """A question for the user if this step is a MAJOR permission, else None (just do it)."""
+        if name == "whatsapp_send" and not _named_in(args.get("contact", ""), goal):
+            return f"Send \"{args.get('message', '')}\" to {args.get('contact', '')} on WhatsApp? You didn't mention them."
+        if name == "phone_action" and str(args.get("action", "")).lower() in ("sms", "whatsapp", "call") \
+                and not _named_in(args.get("target", ""), goal):
+            return f"{args.get('action', '').capitalize()} {args.get('target', '')} from your phone? You didn't mention them."
+        if name == "run_command":
+            kind = classify_command(args.get("command", ""))
+            if kind == "major":
+                return f"This step needs your permission: {args.get('command', '')}. Go ahead?"
+        if name == "write_file":
+            p = Path(os.path.expanduser(args.get("path", "")))
+            if p.exists() and p.stat().st_size > 0 and str(p).lower() not in goal.lower():
+                return f"Overwrite the existing file {p.name}?"
         if name == "system_control" and args.get("command") in ("shutdown", "restart", "suspend", "logout"):
             return f"{args['command'].capitalize()} the laptop?"
+        if name == "browser_click":
+            from web_agent import web
+            info = await web.describe(str(args.get("target", "")))
+            if _MAJOR_CLICK.search(info.get("label", "")) or _MAJOR_CLICK.search(str(args.get("target", ""))):
+                return f"Click \"{info.get('label') or args.get('target')}\" on the website? That can't be undone."
         return None
 
     async def execute(self, name: str, args: dict, ws) -> str:
@@ -196,10 +231,16 @@ class TaskAgent:
             if name == "browser_click":
                 return await web.click(str(args.get("target", "")))
             if name == "browser_type":
+                info = await web.describe(str(args.get("target", "")))
+                if info.get("password"):
+                    return ("NEEDS_USER: This site wants a password or code. Please type it yourself in the KIAROS "
+                            "browser window and sign in, then say continue.")
                 enter = str(args.get("enter", "")).lower() in ("yes", "true", "1")
                 return await web.type(str(args.get("target", "")), args.get("text", ""), enter)
             if name == "whatsapp_send":
-                return await web.whatsapp_send(args.get("contact", ""), args.get("message", ""))
+                say = self.hooks.get("say")
+                return await web.whatsapp_send(args.get("contact", ""), args.get("message", ""),
+                                               on_wait=(lambda t: say(ws, t)) if say else None)
             if name == "phone_action":
                 target = f"{args.get('action', '')} ||| {args.get('target', '')} ||| {args.get('message', '')}"
                 failure = await self.hooks["phone"](target, ws)
@@ -234,6 +275,7 @@ class TaskAgent:
 
     async def run(self, client, goal: str, ws, context: str = "") -> str:
         self.pending = None
+        self.waiting = None
         messages = [{"role": "user", "content": f"{goal}\n\n(Context: {context})" if context else goal}]
         return await self._loop(client, goal, messages, ws)
 
@@ -255,21 +297,30 @@ class TaskAgent:
         for i in range(start, len(uses)):
             u = uses[i]
             args = dict(u.input or {})
-            question = self._needs_confirmation(u.name, args)
+            question = await self._needs_confirmation(u.name, args, goal)
             if question:
                 self.pending = Pending(goal, messages, uses, results, i, question)
                 return question + " Say yes to go ahead."
             log.info(f"Agent tool {u.name}({str(args)[:120]})")
             out = await self.execute(u.name, args, ws)
-            if out.startswith("NEEDS_LOGIN"):
+            if out.startswith(("NEEDS_LOGIN", "NEEDS_USER")):
                 results.append({"type": "tool_result", "tool_use_id": u.id, "content": out})
                 for rest in uses[i + 1:]:
-                    results.append({"type": "tool_result", "tool_use_id": rest.id, "content": "Not run."})
+                    results.append({"type": "tool_result", "tool_use_id": rest.id, "content": "Not run yet."})
                 messages.append({"role": "user", "content": results})
-                return out.removeprefix("NEEDS_LOGIN: ")
+                self.waiting = {"goal": goal, "messages": messages, "time": time.time()}
+                return re.sub(r"^NEEDS_(LOGIN|USER):\s*", "", out)
             results.append({"type": "tool_result", "tool_use_id": u.id, "content": out[:6000]})
         messages.append({"role": "user", "content": results})
         return None
+
+    async def continue_after_user(self, client, ws) -> str:
+        """The user did what was needed (scanned the QR code, logged in): carry on with the task."""
+        w, self.waiting = self.waiting, None
+        if w is None:
+            return "There's no task waiting on you."
+        w["messages"].append({"role": "user", "content": "I've done that. Continue the task from where you stopped."})
+        return await self._loop(client, w["goal"], w["messages"], ws, start_step=1)
 
     async def resume(self, client, approved: bool, ws) -> str:
         """Continue a paused task after the user said yes (or no)."""
