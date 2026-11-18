@@ -5,6 +5,9 @@ Two providers are supported:
   - Google Gemini (GEMINI_API_KEY / GOOGLE_API_KEY) via llm_gemini.GeminiClient
   - Anthropic Claude (ANTHROPIC_API_KEY)
 If both keys are set, Gemini is used unless LLM_PROVIDER=anthropic.
+  - A local model via Ollama (llm_ollama) — used as an automatic backup when the
+    cloud is out of quota or unreachable, or as the only brain with no cloud key
+    (or LLM_PROVIDER=ollama). Disable the backup with OLLAMA_BACKUP=0.
 Every module goes through here so callers never care which one is active.
 """
 
@@ -13,7 +16,10 @@ import os
 
 import anthropic
 
-from llm_gemini import GeminiAuthError, GeminiBusyError, GeminiClient
+import httpx
+
+import llm_ollama
+from llm_gemini import GeminiAuthError, GeminiBusyError, GeminiClient, GeminiError
 
 log = logging.getLogger("kiaros.llm")
 
@@ -21,6 +27,8 @@ log = logging.getLogger("kiaros.llm")
 AUTH_ERRORS = (anthropic.AuthenticationError, GeminiAuthError)
 # Exceptions that mean "the provider is overloaded / rate limited — try again shortly".
 BUSY_ERRORS = (anthropic.RateLimitError, anthropic.InternalServerError, GeminiBusyError)
+# Anything that should send a request to the local backup instead.
+FALLBACK_ERRORS = BUSY_ERRORS + AUTH_ERRORS + (anthropic.APIConnectionError, GeminiError, httpx.HTTPError)
 
 # Fast model for the voice loop (low latency); deep model for research.
 FAST_MODEL = os.getenv("KIAROS_FAST_MODEL", "claude-haiku-5-5")
@@ -38,9 +46,15 @@ def anthropic_key() -> str:
     return os.getenv("ANTHROPIC_API_KEY", "").strip()
 
 
+def _backup_enabled() -> bool:
+    return os.getenv("OLLAMA_BACKUP", "1").strip() not in ("0", "false", "no", "off")
+
+
 def active_provider() -> str | None:
-    """'gemini', 'anthropic', or None when no key is configured."""
+    """'gemini', 'anthropic', 'ollama', or None when nothing is configured."""
     pref = os.getenv("LLM_PROVIDER", "").strip().lower()
+    if pref == "ollama":
+        return "ollama" if llm_ollama.available() else None
     have = {"gemini": bool(gemini_key()), "anthropic": bool(anthropic_key())}
     if pref in have and have[pref]:
         return pref
@@ -48,6 +62,8 @@ def active_provider() -> str | None:
         return "gemini"
     if have["anthropic"]:
         return "anthropic"
+    if _backup_enabled() and llm_ollama.available():
+        return "ollama"
     return None
 
 
@@ -58,13 +74,20 @@ def make_client(api_key: str, provider: str = "anthropic"):
 
 
 def client_from_env():
-    """A client for the active provider, or None if no key is set."""
+    """The active client: cloud (with the local backup if Ollama is ready), local only, or None."""
     provider = active_provider()
+    if provider == "ollama":
+        return llm_ollama.OllamaClient()
     if provider == "gemini":
-        return GeminiClient(gemini_key())
-    if provider == "anthropic":
-        return anthropic.AsyncAnthropic(api_key=anthropic_key())
-    return None
+        cloud = GeminiClient(gemini_key())
+    elif provider == "anthropic":
+        cloud = anthropic.AsyncAnthropic(api_key=anthropic_key())
+    else:
+        return None
+    if _backup_enabled() and llm_ollama.available():
+        log.info(f"Offline backup ready: {llm_ollama.OLLAMA_MODEL} via Ollama")
+        return llm_ollama.FallbackClient(cloud, llm_ollama.OllamaClient())
+    return cloud
 
 
 def provider_of(client) -> str:
@@ -72,7 +95,12 @@ def provider_of(client) -> str:
 
 
 def describe(client) -> str:
-    """Human-readable provider/model, e.g. 'Google Gemini (gemini-2.5-flash)'."""
+    """Human-readable provider/model, e.g. 'Google Gemini (gemini-2.5-flash) + offline backup'."""
+    if isinstance(client, llm_ollama.FallbackClient):
+        now_local = " (using it now)" if client.last_used_backup else ""
+        return f"{describe(client.primary)} + offline backup {client.backup.model}{now_local}"
+    if provider_of(client) == "ollama":
+        return f"Local model {client.model} (offline)"
     if provider_of(client) == "gemini":
         model = getattr(client, "fast_model", None)
         return f"Google Gemini ({model})" if model else "Google Gemini"
@@ -83,7 +111,7 @@ def describe(client) -> str:
 
 async def warm_up(client) -> None:
     """Find a working model before the user's first question (Gemini model discovery + fallback)."""
-    if provider_of(client) != "gemini":
+    if provider_of(client) not in ("gemini", "ollama"):
         return
     try:
         await fast_text(client, "Reply with the word ok.")
@@ -109,6 +137,7 @@ async def fast(
     messages: list[dict],
     system: str | None = None,
     max_tokens: int = 1024,
+    backup_system: str | None = None,
 ):
     """Low-latency call on the fast model. Returns the raw response."""
     kwargs = {
@@ -119,6 +148,10 @@ async def fast(
     }
     if system:
         kwargs["system"] = system
+    if backup_system and isinstance(client, llm_ollama.FallbackClient):
+        kwargs["backup_system"] = backup_system  # shorter instructions for the small local model
+    elif backup_system and provider_of(client) == "ollama":
+        kwargs["system"] = backup_system
     return await client.messages.create(**kwargs)
 
 
