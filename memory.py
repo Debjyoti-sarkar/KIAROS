@@ -412,6 +412,15 @@ def format_plan_for_voice(tasks: list[dict], events: list[dict]) -> str:
 # Memory extraction — learn from conversations
 # ---------------------------------------------------------------------------
 
+import re as _re
+
+_MEMORABLE = _re.compile(
+    r"\b(remember|don't forget|note that|my (name|wife|husband|mom|mother|dad|father|brother|sister|friend|boss|"
+    r"birthday|favou?rite|address|email|number|phone|car|office|company|job)|i (prefer|like|love|hate|work|live|am|'m|"
+    r"use|need|want|have)|call me|i'm (a|an|from|working|planning|going)|we (are|have|use)|planning|deadline)\b",
+    _re.I)
+
+
 async def extract_memories(user_text: str, kiaros_response: str, anthropic_client) -> list[str]:
     """After a conversation turn, extract any facts worth remembering.
 
@@ -419,6 +428,9 @@ async def extract_memories(user_text: str, kiaros_response: str, anthropic_clien
     Returns list of memories stored.
     """
     if not anthropic_client or len(user_text) < 15:
+        return []
+    # Only spend an AI request when the user said something that sounds like a fact about themselves.
+    if not _MEMORABLE.search(user_text):
         return []
 
     try:
@@ -436,6 +448,8 @@ async def extract_memories(user_text: str, kiaros_response: str, anthropic_clien
         )
 
         text = llm.text_of(response).strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         # Parse JSON
         if text.startswith("["):
             items = json.loads(text)

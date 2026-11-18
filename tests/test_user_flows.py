@@ -140,10 +140,10 @@ async def test_greeting_and_missing_key_guidance(live_server):
     try:
         msg = await laptop.next(lambda m: m.get("type") == "text")
         assert msg["text"].startswith("Good ")
-        assert "Anthropic API key" in msg["text"]
+        assert "Google Gemini or Anthropic key" in msg["text"]
         assert msg["speak"] is True  # no Fish key -> device speaks it
         reply = await laptop.say("tell me a joke")
-        assert "API key" in reply
+        assert "AI key isn't set" in reply
     finally:
         await laptop.close()
 
@@ -321,7 +321,37 @@ async def test_settings_reject_bad_input(live_server):
 
 async def test_status_reports_integrations(live_server):
     s = httpx.get(f"{live_server.local}/api/settings/status").json()
-    assert s["env_keys_set"]["anthropic"] is False
+    assert s["env_keys_set"]["anthropic"] is False and s["env_keys_set"]["gemini"] is False
+    assert s["env_keys_set"]["llm"] is False and s["ai_provider"] == "not configured"
     assert s["calendar_configured"] is False and s["mail_configured"] is False
     assert s["voice"] == "device"
     assert s["notes_dir"].startswith(str(live_server.data_dir))
+
+
+async def test_google_key_in_anthropic_box_is_stored_as_gemini(live_server):
+    base = live_server.local
+    r = httpx.post(f"{base}/api/settings/keys", json={"key_name": "ANTHROPIC_API_KEY", "key_value": "AIzaSy-fake-test-key"})
+    assert r.json() == {"success": True, "saved_as": "GEMINI_API_KEY"}
+    env = (live_server.data_dir / "env").read_text()
+    assert "GEMINI_API_KEY=AIzaSy-fake-test-key" in env and "ANTHROPIC_API_KEY=AIza" not in env
+    # Testing it from the Anthropic box asks Google, which rejects this fake key with a clear reason.
+    t = httpx.post(f"{base}/api/settings/test-anthropic", json={"key_value": "AIzaSy-fake-test-key"}, timeout=30).json()
+    assert t["valid"] is False and "Google" in t["error"]
+    httpx.post(f"{base}/api/settings/keys", json={"key_name": "GEMINI_API_KEY", "key_value": ""})
+
+
+async def test_whatsapp_message_end_to_end(live_server):
+    """The user's own sentence: asks first, 'no' sends nothing, 'yes' sends and confirms (stand-in WhatsApp page)."""
+    laptop = await Device.connect(live_server.ws_local(), "laptop")
+    await laptop.drain()
+    try:
+        ask = await laptop.say("hey open WhatsApp and send message to Somesh that how was he")
+        assert ask == 'Send "How was he?" to Somesh on WhatsApp? Say yes to send.'
+        assert await laptop.say("no") == "Okay, not sending it."
+
+        await laptop.say("open WhatsApp and send message to Somesh that how was he")
+        assert await laptop.say("yes") == "Sending it to Somesh."
+        done = await laptop.next(lambda m: m.get("type") == "text" and "Sent to" in m["text"], timeout=60)
+        assert done["text"] == 'Sent to Somesh on WhatsApp: "How was he?"'
+    finally:
+        await laptop.close()

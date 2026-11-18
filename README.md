@@ -49,7 +49,7 @@ Say it to your laptop or your phone; KIAROS answers out loud and gets it done.
                                  ▼
                 ┌────────────────────────────────────┐
                 │  KIAROS server (runs on the laptop) │
-                │  Claude Haiku 5.5 · Opus 5.5        │
+                │  Google Gemini (or Claude)          │
                 │  shared conversation & memory       │
                 │  laptop control · calendar · mail   │
                 │  notes · timers · Claude Code       │
@@ -62,7 +62,7 @@ The laptop is the brain. The phone is a remote that talks to it, so **the laptop
 
 ## Install on the laptop
 
-**You need:** Linux (built for Ubuntu with GNOME), Python 3.11+, Node.js 18+, Google Chrome or Chromium, and an [Anthropic API key](https://console.anthropic.com/).
+**You need:** Linux (built for Ubuntu with GNOME), Python 3.11+, Node.js 18+, Google Chrome or Chromium, and an AI key: a [Google Gemini API key](https://aistudio.google.com/apikey) or an [Anthropic API key](https://console.anthropic.com/).
 
 ```bash
 git clone https://github.com/Debjyoti-sarkar/KIAROS.git
@@ -78,7 +78,7 @@ scripts/setup.sh
 .venv/bin/python server.py
 ```
 
-Open **http://localhost:8340** in Chrome. The Settings panel opens the first time: paste your Anthropic API key, click **Save**, and start talking. On the laptop KIAROS listens all the time; click the mic button to mute it.
+Open **http://localhost:8340** in Chrome. The Settings panel opens the first time: paste your Google Gemini API key (or an Anthropic key), click **Test**, then **Save**, and start talking. On the laptop KIAROS listens all the time; click the mic button to mute it.
 
 ### Start it automatically at login (recommended)
 
@@ -114,6 +114,16 @@ Native speech recognition, and it can dial and text directly.
 4. In the phone app, type the **server address** and **token** from that screen and tap **Connect**.
 5. **Tap the orb (or the mic button) and speak.** The ⌨ button lets you type instead.
 
+### Phone plugged in with USB (no Wi-Fi needed)
+
+With USB debugging on, run this once after plugging the phone in, then use `http://localhost:8340` as the server address in the app (no token needed over USB):
+
+```bash
+adb reverse tcp:8340 tcp:8340
+```
+
+The link lasts while the cable is connected; run it again after re-plugging. Use Wi-Fi pairing for wireless use.
+
 ### Option B: the phone's browser (nothing to install)
 
 1. On the laptop, open KIAROS → **⋮ menu → Pair phone**.
@@ -135,7 +145,8 @@ Everything is in the app's **Settings** panel; it's stored in `.env` (template: 
 
 | Setting | What it's for |
 |---|---|
-| **Anthropic API key** | Required. Claude is KIAROS's brain. |
+| **Google Gemini API key** | KIAROS's brain. It automatically uses the newest Gemini Flash model for conversation and Pro (with Google Search) for research. |
+| **Anthropic API key** | Alternative to Gemini: Claude Haiku for conversation, Opus with web search for research. If both are set, Gemini is used. |
 | **Fish Audio key + voice ID** | Optional premium voice. Without it, each device uses its own built-in voice. |
 | **Calendar link** | Google Calendar → Settings → your calendar → *Secret address in iCal format*. Several can be comma-separated. Read-only. |
 | **Email + app password** | Gmail: create an [app password](https://myaccount.google.com/apppasswords). Read-only: KIAROS can never send, delete or mark email. |
@@ -160,7 +171,7 @@ Advanced options in `.env`:
 - **Only paired devices get in.** Anything that isn't the laptop itself must present the pairing token: every request, the voice connection, and report links.
 - **No arbitrary commands.** Laptop control is a fixed list of safe actions. Shutdown, restart, sleep and log-out always ask "Say yes to confirm".
 - **Email is read-only** and **notes are never edited or deleted.** KIAROS only reads email and only creates new notes.
-- **Your data stays on your laptop** in `data/`. Speech text is sent to Anthropic to generate replies (and to Fish Audio if you enable it).
+- **Your data stays on your laptop** in `data/`. Speech text is sent to your AI provider (Google or Anthropic) to generate replies, and to Fish Audio if you enable it.
 - **Builds** run Claude Code with full permissions inside the new project's folder. Only pair devices you trust.
 
 ---
@@ -169,7 +180,8 @@ Advanced options in `.env`:
 
 | Problem | Fix |
 |---|---|
-| "My Anthropic API key isn't set" | Settings → paste the key → Save. |
+| "My AI key isn't set" | Settings → paste your Gemini (or Anthropic) key → Test → Save. |
+| "My API key was rejected" | Create a new key at aistudio.google.com/apikey; billing must be enabled for heavy use. |
 | Phone app can't connect | Same Wi-Fi? Server running? Address must include `:8340`. If `ufw` is on: `sudo ufw allow 8340,8341/tcp`. |
 | Phone shows a red dot / "not paired" | The token changed. Pair again from the laptop. |
 | Phone browser has no microphone | Use the `https://…:8341` link from the QR code, not `http://`. If your Wi-Fi IP changed, run `scripts/setup.sh --new-cert`. |
@@ -205,7 +217,7 @@ Tests that need a live Anthropic key or open internet skip themselves when those
 | Part | Where |
 |---|---|
 | Server, voice loop, actions, sync | `server.py` |
-| Claude calls (models, research) | `llm.py` |
+| AI providers (Gemini, Claude) | `llm.py`, `llm_gemini.py` |
 | Laptop controls (allowlist) | `system_control.py` |
 | Terminal / browser / Claude Code | `actions.py` |
 | Calendar · email · notes · screen | `calendar_access.py` · `mail_access.py` · `notes_access.py` · `screen.py` |
@@ -215,7 +227,7 @@ Tests that need a live Anthropic key or open internet skip themselves when those
 | Android app | `frontend/android/` |
 | Tests | `tests/` |
 
-**Models:** `claude-haiku-5-5` (fast, for conversation) and `claude-opus-5-5` with web search (research). Change them with `KIAROS_FAST_MODEL` / `KIAROS_DEEP_MODEL`.
+**Models:** with Gemini, the newest Flash (conversation) and Pro + Google Search (research) your key can use. Pin them with `GEMINI_FAST_MODEL` / `GEMINI_DEEP_MODEL`. With Claude: `claude-haiku-5-5` and `claude-opus-5-5` (`KIAROS_FAST_MODEL` / `KIAROS_DEEP_MODEL`).
 
 ## License
 
