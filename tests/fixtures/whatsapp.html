@@ -1,0 +1,41 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>WhatsApp (test double)</title></head>
+<body>
+<!-- A minimal stand-in for WhatsApp Web's structure, used by the test suite. -->
+<div id="side">
+  <div contenteditable="true" aria-label="Search input textbox" id="search"></div>
+</div>
+<div id="pane-side" aria-label="Chat list"></div>
+<div id="main" style="display:none">
+  <header><span id="chat-title"></span></header>
+  <div id="messages"></div>
+  <footer><div contenteditable="true" aria-label="Type a message" id="box"></div></footer>
+</div>
+<script>
+const chats = ["Somesh", "Somesh Office", "Mom", "College Friends"];
+const pane = document.getElementById("pane-side");
+function render(q) {
+  pane.innerHTML = "";
+  for (const c of chats.filter(c => c.toLowerCase().includes(q.toLowerCase()))) {
+    const row = document.createElement("div");
+    row.innerHTML = `<span title="${c}">${c}</span>`;
+    row.onclick = () => { document.getElementById("main").style.display = "block";
+                          document.getElementById("chat-title").textContent = c; window.openChat = c; };
+    pane.appendChild(row);
+  }
+}
+render("");
+document.getElementById("search").addEventListener("input", e => render(e.target.textContent));
+document.getElementById("box").addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const b = document.getElementById("box");
+    const m = document.createElement("div");
+    m.className = "message-out"; m.textContent = b.textContent;
+    document.getElementById("messages").appendChild(m);
+    window.sent = (window.sent || []).concat([{ to: window.openChat, text: b.textContent }]);
+    b.textContent = "";
+  }
+});
+</script>
+</body></html>

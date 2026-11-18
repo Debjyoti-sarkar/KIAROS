@@ -13,11 +13,11 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
-# Data (user-specific, generated at runtime)
+# Data (user-specific, generated at runtime): memory, conversation,
+# browser profile with your logins, reports. Never commit any of it.
 *.db
-data/*.jsonl
-data/active_session.json
-data/.kiaros_output.txt
+data/*
+!data/.gitkeep
 
 # Certificates
 *.pem
@@ -40,8 +40,6 @@ context/
 *.db-shm
 *.db-wal
 
-# KIAROS runtime output
-data/reports/
 
 # Android
 *.apk

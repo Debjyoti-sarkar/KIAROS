@@ -150,7 +150,14 @@ ACTION SYSTEM — put exactly ONE tag at the END of your reply when something mu
   "take me to the airport" → [ACTION:PHONE] navigate ||| airport
 - [ACTION:ADD_CONTACT] name ||| phone number — save a contact. "save mom's number 98765 43210" → [ACTION:ADD_CONTACT] Mom ||| 9876543210
 - [ACTION:TIMER] seconds ||| label — set a timer/reminder. "remind me in 10 minutes to check the oven" → [ACTION:TIMER] 600 ||| check the oven
-- [ACTION:BROWSE] url or search query — open the browser on the device the user is using.
+- [ACTION:TASK] goal — carry out a multi-step job END TO END on the laptop with tools: anything involving a website
+  (WhatsApp Web, Gmail, YouTube, forms, shopping, looking something up and acting on it), files and folders, shell
+  commands, installing things, or several steps chained together. Write the goal fully and concretely.
+  "open whatsapp and tell Somesh I'll be late" → [ACTION:TASK] Send Somesh a WhatsApp message saying "I'll be late."
+  "find the biggest files in my downloads and tell me" → [ACTION:TASK] Find the 5 largest files in ~/Downloads and report them.
+  "play lofi music on youtube" → [ACTION:TASK] Open YouTube and play a lofi music video.
+  Prefer TASK over BROWSE whenever something must be DONE on a site rather than just shown.
+- [ACTION:BROWSE] url or search query — just open a page for the user to look at.
 - [ACTION:RESEARCH] detailed research brief — real research with live web search; a report opens when done.
 - [ACTION:BUILD] description — build a new project with Claude Code on the laptop.
 - [ACTION:OPEN_TERMINAL] — open a terminal with Claude Code on the laptop.
@@ -601,7 +608,7 @@ def strip_markdown_for_tts(text: str) -> str:
 
 ACTION_TYPES = (
     "BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|"
-    "REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN|SYSTEM|PHONE|ADD_CONTACT|TIMER"
+    "REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN|SYSTEM|PHONE|ADD_CONTACT|TIMER|TASK"
 )
 
 
@@ -839,7 +846,7 @@ footer{{color:var(--muted);font-size:.85em;margin-top:40px;border-top:1px solid 
 async def _execute_research(brief: str, ws=None, history: list | None = None):
     """Research with live web search on the deep model, save a report, open it."""
     if not anthropic_client:
-        await speak(ws, "Research needs an Anthropic API key. Add one in settings.")
+        await speak(ws, "Research needs an AI key. Add a Google Gemini or Anthropic key in settings.")
         return
     try:
         text = await llm.research(
@@ -975,6 +982,91 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
+# Task agent (multi-step jobs) and WhatsApp
+# ---------------------------------------------------------------------------
+
+from agent import TaskAgent  # noqa: E402
+
+
+async def _agent_phone(target: str, ws):
+    return await _execute_phone(target, ws)
+
+
+async def _agent_timer(seconds: int, label: str):
+    asyncio.create_task(_run_timer(seconds, label))
+
+
+task_agent = TaskAgent({"phone": _agent_phone, "timer": _agent_timer, "note": create_local_note})
+_agent_running = {"busy": False}
+
+
+async def _run_agent(goal: str, ws, history: list | None = None, resume: bool | None = None):
+    """Run (or resume) a task in the background and speak the outcome."""
+    if _agent_running["busy"]:
+        await speak(ws, "I'm still working on the previous task. I'll take this one after.")
+        return
+    _agent_running["busy"] = True
+    try:
+        await ws.send_json({"type": "status", "state": "working"})
+    except Exception:
+        pass
+    try:
+        if resume is None:
+            log.info(f"Task started: {goal[:120]}")
+            result = await task_agent.run(anthropic_client, goal, ws, context=describe_devices(ws))
+        else:
+            result = await task_agent.resume(anthropic_client, resume, ws)
+    except llm.BUSY_ERRORS as e:
+        from llm_gemini import GeminiQuotaError
+        result = str(e) if isinstance(e, GeminiQuotaError) else "Google's AI servers are overloaded, so I couldn't finish that. Try again shortly."
+    except llm.AUTH_ERRORS:
+        result = "My API key was rejected, so I couldn't do that task."
+    except Exception as e:
+        log.error(f"Task failed: {e}", exc_info=True)
+        result = f"That task ran into a problem: {str(e)[:120]}"
+    finally:
+        _agent_running["busy"] = False
+    log.info(f"Task result: {result[:200]}")
+    add_turn("assistant", result, device_of(ws))
+    _save_conversation()
+    await speak(ws, result)
+
+
+_QUESTION_START = re.compile(r"^(how|what|when|where|why|who|which|are|is|did|do|does|can|could|will|would|have|has|shall)\b", re.I)
+
+
+def _tidy_message(msg: str) -> str:
+    msg = re.sub(r"^(that|saying|to say|:)\s+", "", msg.strip(), flags=re.I).strip(" .")
+    if not msg:
+        return msg
+    msg = msg[0].upper() + msg[1:]
+    if not msg.endswith(("?", "!", ".")):
+        msg += "?" if _QUESTION_START.match(msg) else "."
+    return msg
+
+
+def detect_whatsapp_command(text: str) -> dict | None:
+    """'open whatsapp and send a message to Somesh that how was he' → {'contact','message'} (no AI needed)."""
+    t = _strip_filler(text)
+    if "whatsapp" not in t.lower():
+        return None
+    t = re.sub(r"^(open|launch|go to|on)\s+whatsapp\s*(and|then|,)?\s*", "", t, flags=re.I)
+    patterns = [
+        r"^(?:send|write|drop)\s+(?:a\s+)?(?:whatsapp\s+)?(?:message|msg|text|note)?\s*to\s+(?P<who>.+?)\s+(?:on\s+whatsapp\s+)?(?:that|saying|telling\s+(?:him|her|them)|:)\s*(?P<msg>.+)$",
+        r"^(?:message|text|tell|ask|whatsapp)\s+(?P<who>.+?)\s+(?:on\s+whatsapp\s+)?(?:that|saying|to\s+say|:)\s*(?P<msg>.+)$",
+        r"^(?:send|write)\s+(?P<who>[\w .'-]+?)\s+(?:a\s+)?(?:whatsapp\s+)?(?:message|msg|text)\s+(?:on\s+whatsapp\s+)?(?:that|saying|:)?\s*(?P<msg>.+)$",
+    ]
+    for pat in patterns:
+        m = re.match(pat, t, re.I)
+        if m:
+            who = re.sub(r"\s+on\s+whatsapp$", "", m.group("who").strip(), flags=re.I)
+            msg = _tidy_message(re.sub(r"\s+on\s+whatsapp$", "", m.group("msg"), flags=re.I))
+            if who and msg and len(who.split()) <= 4:
+                return {"contact": who, "message": msg}
+    return None
+
+
+# ---------------------------------------------------------------------------
 # TTS (Fish Audio, optional — devices fall back to their own voices)
 # ---------------------------------------------------------------------------
 
@@ -1057,14 +1149,19 @@ async def generate_response(
         response = await llm.fast(client, messages, system=system, max_tokens=1024)
         track_usage(response)
         return llm.text_of(response) or "I didn't catch a usable answer there. Could you say that again?"
-    except anthropic.AuthenticationError:
+    except llm.AUTH_ERRORS:
         return "My API key was rejected. Please check it in settings."
-    except anthropic.RateLimitError:
-        return "I'm being rate limited. Give me a moment and try again."
+    except llm.BUSY_ERRORS as e:
+        log.warning(f"LLM busy: {e}")
+        from llm_gemini import GeminiQuotaError
+        if isinstance(e, GeminiQuotaError):
+            extra = " Turn on billing for your key in Google AI Studio to remove the limit." if e.daily else ""
+            return f"{e}{extra} Laptop controls, calls and messages still work meanwhile."
+        return "Google's AI servers are overloaded this moment. Ask me again in a few seconds."
     except anthropic.APIConnectionError:
         return "I can't reach my language model. Is the laptop online?"
     except Exception as e:
-        log.error(f"LLM error: {e}")
+        log.error(f"LLM error: {type(e).__name__}: {e}")
         return "I'm having trouble with my language systems right now."
 
 
@@ -1162,6 +1259,10 @@ def get_usage_summary() -> str:
     today_cost = _cost_from_tokens(today["input_tokens"], today["output_tokens"])
     all_cost = _cost_from_tokens(all_time["input_tokens"], all_time["output_tokens"])
 
+    if llm.provider_of(anthropic_client) == "gemini":
+        return (f"This session: {uptime_min} minutes, {session['api_calls']} calls, "
+                f"{session['input'] + session['output']} tokens. Today: {today['api_calls']} calls. "
+                "Check Google AI Studio for exact Gemini billing.")
     parts = [f"This session: {uptime_min} minutes, {session['api_calls']} calls, ${session_cost:.2f}."]
 
     if today["api_calls"] > session["api_calls"]:
@@ -1235,10 +1336,12 @@ async def _refresh_context_async():
 async def lifespan(application: FastAPI):
     global anthropic_client, cached_projects
     auth.ensure_token()
-    if ANTHROPIC_API_KEY:
-        anthropic_client = llm.make_client(ANTHROPIC_API_KEY)
+    anthropic_client = llm.client_from_env()
+    if anthropic_client:
+        log.info(f"AI provider: {llm.active_provider()}")
+        asyncio.create_task(llm.warm_up(anthropic_client))
     else:
-        log.warning("ANTHROPIC_API_KEY not set — conversation disabled until you add it in settings")
+        log.warning("No AI key set (GEMINI_API_KEY or ANTHROPIC_API_KEY) — add one in settings")
     cached_projects = []
     _load_conversation()
     _refresh_context_sync()
@@ -1425,7 +1528,8 @@ _NUMBER_RE = r"\+?\d[\d\s().-]{4,}\d"
 
 def _strip_filler(text: str) -> str:
     t = text.strip().rstrip(".!?")
-    return re.sub(r"^(hey |ok |okay )?kiaros[,\s]*|^(please |can you |could you )", "", t, flags=re.I).strip()
+    t = re.sub(r"^((hey|hi|hello|ok|okay|yo)[,\s]+)?(kiaros[,\s]+)?", "", t, flags=re.I)
+    return re.sub(r"^(please|can you|could you|would you)[,\s]+", "", t, flags=re.I).strip()
 
 
 def detect_phone_command(text: str) -> dict | None:
@@ -1706,7 +1810,7 @@ async def voice_handler(ws: WebSocket):
             part = "morning" if hour < 12 else "afternoon" if hour < 17 else "evening"
             greeting = f"Good {part}, {HONORIFIC}." if HONORIFIC else f"Good {part}{', ' + USER_NAME if USER_NAME else ''}."
             if not anthropic_client:
-                greeting += " I need an Anthropic API key before I can talk properly. Open settings to add one."
+                greeting += " I need an AI key before I can talk properly. Open settings to add a Google Gemini or Anthropic key."
 
             async def _greet():
                 await asyncio.sleep(0.8)  # let the client's hello arrive first
@@ -1766,6 +1870,33 @@ async def voice_handler(ws: WebSocket):
                 t_lower = user_text.lower()
                 response_text = ""
 
+                # ── A paused task or message waiting for the user's yes/no ──
+                yes = re.match(r"^(yes|yeah|yep|yup|haan|ha|confirm|do it|go ahead|sure|send it|okay|ok)\b", t_lower)
+                no = re.match(r"^(no|nope|nah|cancel|don't|stop|never ?mind|wait)\b", t_lower)
+                if task_agent.pending and time.time() - task_agent.pending.created < 180 and (yes or no):
+                    response_text = "Going ahead." if yes else "Okay, cancelled."
+                    asyncio.create_task(_run_agent("", ws, history, resume=bool(yes)))
+                    await finish(response_text, user_text)
+                    continue
+                pending_send = session.get("pending_send")
+                if pending_send:
+                    session["pending_send"] = None
+                    if time.time() - pending_send["time"] < 120 and (yes or no):
+                        if yes:
+                            from web_agent import web
+                            await finish(f"Sending it to {pending_send['contact']}.", user_text)
+
+                            async def _send(p=pending_send):
+                                result = await web.whatsapp_send(p["contact"], p["message"])
+                                result = result.removeprefix("NEEDS_LOGIN: ")
+                                add_turn("assistant", result, device_of(ws))
+                                _save_conversation()
+                                await speak(ws, result)
+                            asyncio.create_task(_send())
+                        else:
+                            await finish("Okay, not sending it.", user_text)
+                        continue
+
                 # ── Pending power-action confirmation ──
                 pending = session.get("pending_confirm")
                 if pending:
@@ -1778,6 +1909,13 @@ async def voice_handler(ws: WebSocket):
                         await finish("Cancelled.", user_text)
                         continue
                     # Anything else: treat as a new request and drop the pending action.
+
+                # ── Instant WhatsApp (no AI needed); always confirms before sending ──
+                wa = None if (planner.is_planning or work_session.active) else detect_whatsapp_command(user_text)
+                if wa:
+                    session["pending_send"] = {**wa, "time": time.time()}
+                    await finish(f"Send \"{wa['message']}\" to {wa['contact']} on WhatsApp? Say yes to send.", user_text)
+                    continue
 
                 # ── Instant phone / contact commands ──
                 phone_cmd = None if (planner.is_planning or work_session.active) else detect_phone_command(user_text)
@@ -1914,7 +2052,7 @@ async def voice_handler(ws: WebSocket):
                         elif kind == "system":
                             response_text = await system_control.run_command(action["command"])
                     elif not anthropic_client:
-                        response_text = "My Anthropic API key isn't set. Open settings from the menu to add it."
+                        response_text = "My AI key isn't set. Open settings from the menu and add your Google Gemini or Anthropic key."
                     else:
                         response_text = await generate_response(
                             user_text, anthropic_client, task_manager, cached_projects, history,
@@ -1976,6 +2114,11 @@ async def _dispatch_embedded_action(embedded: dict, ws, work_session: WorkSessio
         recently_built.append({"name": name, "path": path, "time": time.time()})
         did = dispatch_registry.register(name, path, target)
         asyncio.create_task(_execute_prompt_project(name, target, work_session, ws, dispatch_id=did, history=history, voice_state=voice_state))
+        return None
+    if kind == "task":
+        if not anthropic_client:
+            return "Tasks need an AI key. Add one in settings."
+        asyncio.create_task(_run_agent(target, ws, history))
         return None
     if kind == "browse":
         asyncio.create_task(_execute_browse(target, ws))
@@ -2095,7 +2238,7 @@ class PreferencesUpdate(BaseModel):
 
 
 SETTABLE_KEYS = {
-    "ANTHROPIC_API_KEY", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC",
+    "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LLM_PROVIDER", "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC",
     "CALENDAR_ICS_URLS", "MAIL_IMAP_HOST", "MAIL_ADDRESS", "MAIL_APP_PASSWORD",
     "NOTES_DIR", "WEATHER_LOCATION",
 }
@@ -2104,9 +2247,14 @@ SETTABLE_KEYS = {
 def _apply_runtime(key: str, value: str):
     """Make a saved setting take effect without restarting."""
     global anthropic_client, ANTHROPIC_API_KEY, FISH_API_KEY, FISH_VOICE_ID, USER_NAME, HONORIFIC
-    if key == "ANTHROPIC_API_KEY":
-        ANTHROPIC_API_KEY = value
-        anthropic_client = llm.make_client(value) if value else None
+    if key in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LLM_PROVIDER"):
+        if key == "ANTHROPIC_API_KEY":
+            ANTHROPIC_API_KEY = value
+        os.environ[key] = value
+        anthropic_client = llm.client_from_env()
+        log.info(f"AI provider is now: {llm.active_provider() or 'none'}")
+        if anthropic_client:
+            asyncio.create_task(llm.warm_up(anthropic_client))
     elif key == "FISH_API_KEY":
         FISH_API_KEY = value
     elif key == "FISH_VOICE_ID":
@@ -2129,8 +2277,14 @@ async def api_settings_keys(body: KeyUpdate):
     value = body.key_value.strip()
     if "\n" in value or "\r" in value:
         return JSONResponse({"success": False, "error": "Value must be a single line"}, status_code=400)
-    _set_key(body.key_name, value)
-    return {"success": True}
+    key_name = body.key_name
+    # Google keys start with "AIza"; Anthropic keys with "sk-ant-". Put each where it belongs.
+    if key_name == "ANTHROPIC_API_KEY" and value.startswith("AIza"):
+        key_name = "GEMINI_API_KEY"
+    elif key_name == "GEMINI_API_KEY" and value.startswith("sk-ant-"):
+        key_name = "ANTHROPIC_API_KEY"
+    _set_key(key_name, value)
+    return {"success": True, "saved_as": key_name}
 
 
 @app.post("/api/settings/test-anthropic")
@@ -2138,11 +2292,33 @@ async def api_test_anthropic(body: KeyTest):
     key = body.key_value or os.getenv("ANTHROPIC_API_KEY", "")
     if not key:
         return {"valid": False, "error": "No key provided"}
+    if key.startswith("AIza"):  # a Google key pasted in the Anthropic box
+        return await api_test_gemini(body)
     try:
         await llm.fast_text(llm.make_client(key), "Reply with the word ok.", max_tokens=1024)
         return {"valid": True}
     except anthropic.AuthenticationError:
         return {"valid": False, "error": "Invalid API key"}
+    except Exception as e:
+        return {"valid": False, "error": str(e)[:200]}
+
+
+@app.post("/api/settings/test-gemini")
+async def api_test_gemini(body: KeyTest):
+    key = body.key_value or llm.gemini_key()
+    if not key:
+        return {"valid": False, "error": "No key provided"}
+    if key.startswith("sk-ant-"):
+        return {"valid": False, "error": "That's an Anthropic key. Paste it in the Anthropic API key box instead."}
+    try:
+        client = llm.make_client(key, "gemini")
+        reply = await llm.fast_text(client, "Reply with the word ok.")
+        return {"valid": bool(reply), "model": client.fast_model, "research_model": client.deep_model}
+    except llm.AUTH_ERRORS as e:
+        from llm_gemini import explain_key_error
+        reason = explain_key_error(str(e))
+        log.warning(f"Gemini key test failed: {str(e)[:200]}")
+        return {"valid": False, "error": reason}
     except Exception as e:
         return {"valid": False, "error": str(e)[:200]}
 
@@ -2210,6 +2386,7 @@ async def api_settings_status():
         "notes_dir": str(notes_dir()),
         "screenshot_available": screenshot_tool() is not None,
         "voice": "fish" if FISH_API_KEY else "device",
+        "ai_provider": llm.describe(anthropic_client),
         "memory_count": memory_count,
         "task_count": task_count,
         "devices": [{"device": i["device"], "platform": i["platform"]} for i in clients.values()],
@@ -2217,6 +2394,8 @@ async def api_settings_status():
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
             "anthropic": _is_set(env, "ANTHROPIC_API_KEY", "your-anthropic-api-key-here"),
+            "gemini": _is_set(env, "GEMINI_API_KEY") or _is_set(env, "GOOGLE_API_KEY"),
+            "llm": bool(anthropic_client),
             "fish_audio": _is_set(env, "FISH_API_KEY", "your-fish-audio-api-key-here"),
             "fish_voice_id": _is_set(env, "FISH_VOICE_ID"),
             "calendar": _is_set(env, "CALENDAR_ICS_URLS"),

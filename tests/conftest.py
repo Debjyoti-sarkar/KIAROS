@@ -78,13 +78,16 @@ def live_server():
     (data / "notes").mkdir()
     env_file = data / "env"
     env_file.write_text("")
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "FISH_", "MAIL_", "CALENDAR_"))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "GEMINI_", "GOOGLE_API", "LLM_PROVIDER", "FISH_", "MAIL_", "CALENDAR_"))}
     env.update({
         "KIAROS_DATA_DIR": str(data / "data"),
         "KIAROS_ENV_FILE": str(env_file),
         "NOTES_DIR": str(data / "notes"),
         "KIAROS_TOKEN": TOKEN,
         "KIAROS_PORT": str(port),
+        # WhatsApp automation runs against a local stand-in page, headless — never your real WhatsApp.
+        "KIAROS_WHATSAPP_URL": (ROOT / "tests" / "fixtures" / "whatsapp.html").as_uri(),
+        "KIAROS_BROWSER_HEADLESS": "1",
         "PYTHONUNBUFFERED": "1",
     })
     log = open(data / "server.log", "w")

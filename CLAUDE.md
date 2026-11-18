@@ -14,7 +14,8 @@ When a user opens this repo with Claude Code, help them:
 
 ## Architecture
 - **Backend**: FastAPI (`server.py`). HTTP :8340 (laptop + app), HTTPS :8341 (phone browser) when cert.pem exists.
-- **LLM**: `llm.py`. `claude-haiku-5-5` at effort "low" for the voice loop; `claude-opus-5-5` + `web_search_20260209` + server-side refusal fallbacks for research. Always read replies with `llm.text_of()`: these models return thinking blocks, so never use `content[0].text`.
+- **LLM providers**: `llm.py` selects Google Gemini (`GEMINI_API_KEY`, via `llm_gemini.GeminiClient`, which mimics the Anthropic client's `messages.create` so callers don't change; models auto-discovered: newest Flash / Pro, Google Search for research) or Anthropic. Gemini wins if both keys are set unless `LLM_PROVIDER=anthropic`. Catch `llm.AUTH_ERRORS` for bad keys.
+- **LLM (Anthropic)**: `llm.py`. `claude-haiku-5-5` at effort "low" for the voice loop; `claude-opus-5-5` + `web_search_20260209` + server-side refusal fallbacks for research. Always read replies with `llm.text_of()`: these models return thinking blocks, so never use `content[0].text`.
 - **Auth**: `auth.py`. Loopback is trusted; all other HTTP/WS needs `KIAROS_TOKEN` (Bearer header or `?token=`). `/api/pairing` is loopback-only.
 - **Laptop control**: `system_control.py`, an allowlisted command set (wpctl/pactl, MPRIS via gdbus, gtk-launch, GNOME ScreenSaver lock, systemctl power). Power actions need spoken confirmation (handled in `server.py` via `session["pending_confirm"]`).
 - **Desktop actions**: `actions.py` (terminal detection, xdg-open, Claude Code launch, project naming).

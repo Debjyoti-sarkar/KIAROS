@@ -15,6 +15,7 @@ interface StatusResponse {
   notes_dir: string;
   screenshot_available: boolean;
   voice: "fish" | "device";
+  ai_provider: string;
   memory_count: number;
   task_count: number;
   devices: { device: string; platform: string }[];
@@ -22,6 +23,8 @@ interface StatusResponse {
   uptime_seconds: number;
   env_keys_set: {
     anthropic: boolean;
+    gemini: boolean;
+    llm: boolean;
     fish_audio: boolean;
     fish_voice_id: boolean;
     calendar: boolean;
@@ -99,13 +102,16 @@ function buildPanelHTML(): string {
       </div>
 
       <div class="settings-welcome" id="settings-welcome" style="display:none">
-        <p>Welcome to KIAROS. Add your Anthropic API key to get started — everything else is optional.</p>
+        <p>Welcome to KIAROS. Add a Google Gemini API key (or an Anthropic key) to get started — everything else is optional.</p>
       </div>
 
       <div class="settings-body">
         <section class="settings-section">
           <h3>AI &amp; Voice</h3>
-          ${field("Anthropic API key (required)", "input-anthropic-key", { type: "password", placeholder: "sk-ant-…", test: "btn-test-anthropic" })}
+          ${field("Google Gemini API key", "input-gemini-key", { type: "password", placeholder: "AIza…", test: "btn-test-gemini",
+            hint: "From aistudio.google.com/apikey. KIAROS picks the newest Gemini Flash and Pro models your key can use." })}
+          ${field("Anthropic API key (optional alternative)", "input-anthropic-key", { type: "password", placeholder: "sk-ant-…", test: "btn-test-anthropic",
+            hint: "If both keys are set, Gemini is used." })}
           ${field("Fish Audio API key (optional)", "input-fish-key", { type: "password", placeholder: "leave empty to use the device's voice", test: "btn-test-fish" })}
           ${field("Fish voice model ID (optional)", "input-fish-voice-id", { placeholder: "voice model id from fish.audio" })}
           <div class="settings-actions"><button class="settings-btn primary" id="btn-save-keys">Save</button></div>
@@ -155,6 +161,7 @@ function buildPanelHTML(): string {
             <div class="status-row"><span class="status-dot" id="status-calendar"></span><span>Calendar</span></div>
             <div class="status-row"><span class="status-dot" id="status-mail"></span><span>Email</span></div>
             <div class="status-row"><span class="status-dot" id="status-screen"></span><span>Screenshots</span><span class="status-detail" id="status-screen-detail"></span></div>
+            <div class="status-row"><span class="status-dot" id="status-ai"></span><span>AI</span><span class="status-detail" id="status-ai-detail"></span></div>
             <div class="status-row"><span class="status-dot status-green"></span><span>Voice</span><span class="status-detail" id="status-voice"></span></div>
             <div class="status-row"><span class="status-dot status-green"></span><span>Devices</span><span class="status-detail" id="status-devices"></span></div>
           </div>
@@ -239,7 +246,10 @@ async function loadStatus(): Promise<StatusResponse | null> {
     document.getElementById("status-voice")!.textContent = s.voice === "fish" ? "Fish Audio" : "device voice";
     document.getElementById("status-devices")!.textContent =
       s.devices.map((d) => d.device).join(", ") || "none";
-    setDot("btn-test-anthropic-dot", s.env_keys_set.anthropic ? "green" : "red");
+    setDot("btn-test-gemini-dot", s.env_keys_set.gemini ? "green" : "off");
+    setDot("btn-test-anthropic-dot", s.env_keys_set.anthropic ? "green" : "off");
+    setDot("status-ai", s.env_keys_set.llm ? "green" : "red");
+    document.getElementById("status-ai-detail")!.textContent = s.ai_provider;
     setDot("btn-test-fish-dot", s.env_keys_set.fish_audio ? "green" : "off");
     setDot("btn-test-calendar-dot", s.env_keys_set.calendar ? "green" : "off");
     setDot("btn-test-mail-dot", s.env_keys_set.mail_password ? "green" : "off");
@@ -269,10 +279,11 @@ async function loadPreferences() {
 async function runTest(btnId: string, url: string, body: unknown = {}) {
   setDot(`${btnId}-dot`, "yellow");
   try {
-    const r = await apiPost<{ valid: boolean; error?: string }>(url, body);
+    const r = await apiPost<{ valid: boolean; error?: string; model?: string; research_model?: string }>(url, body);
     setDot(`${btnId}-dot`, r.valid ? "green" : "red");
     const btn = document.getElementById(btnId)!;
-    btn.title = r.valid ? "Working" : r.error || "Failed";
+    btn.title = r.valid ? (r.model ? `Working: ${r.model} (research: ${r.research_model})` : "Working") : r.error || "Failed";
+    if (r.valid && r.model) alert(`Gemini key works.\nConversation: ${r.model}\nResearch: ${r.research_model}\n\nClick Save to use it.`);
     if (!r.valid && r.error) alert(r.error);
   } catch {
     setDot(`${btnId}-dot`, "red");
@@ -285,14 +296,17 @@ function wireEvents() {
   on("settings-backdrop", closeSettings);
 
   on("btn-save-keys", async () => {
-    const a = val("input-anthropic-key"), f = val("input-fish-key"), v = val("input-fish-voice-id");
+    const g = val("input-gemini-key"), a = val("input-anthropic-key"), f = val("input-fish-key"), v = val("input-fish-voice-id");
+    if (g) await saveKey("GEMINI_API_KEY", g);
     if (a) await saveKey("ANTHROPIC_API_KEY", a);
     if (f) await saveKey("FISH_API_KEY", f);
     if (v) await saveKey("FISH_VOICE_ID", v);
+    setVal("input-gemini-key", "");
     setVal("input-anthropic-key", "");
     setVal("input-fish-key", "");
     await loadStatus();
   });
+  on("btn-test-gemini", () => runTest("btn-test-gemini", "/api/settings/test-gemini", { key_value: val("input-gemini-key") || undefined }));
   on("btn-test-anthropic", () => runTest("btn-test-anthropic", "/api/settings/test-anthropic", { key_value: val("input-anthropic-key") || undefined }));
   on("btn-test-fish", () => runTest("btn-test-fish", "/api/settings/test-fish", { key_value: val("input-fish-key") || undefined }));
 
@@ -337,7 +351,7 @@ export async function openSettings() {
   const status = await loadStatus();
   await loadPreferences();
   const welcome = document.getElementById("settings-welcome")!;
-  welcome.style.display = status && !status.env_keys_set.anthropic ? "block" : "none";
+  welcome.style.display = status && !status.env_keys_set.llm ? "block" : "none";
 }
 
 const SETUP_DISMISSED = "kiaros.setupDismissed";
@@ -411,7 +425,7 @@ export async function checkFirstTimeSetup(): Promise<boolean> {
   } catch { /* ignore */ }
   try {
     const status = await apiGet<StatusResponse>("/api/settings/status");
-    if (!status.env_keys_set.anthropic && !document.querySelector(".kiaros-overlay.open")) {
+    if (!status.env_keys_set.llm && !document.querySelector(".kiaros-overlay.open")) {
       openSettings();
       return true;
     }

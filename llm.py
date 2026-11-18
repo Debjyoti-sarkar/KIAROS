@@ -1,8 +1,11 @@
 """
-KIAROS LLM helpers — one place for model IDs and Claude API call shapes.
+KIAROS LLM helpers — one place for providers, model IDs and call shapes.
 
-Every module that talks to Claude goes through here so model upgrades are a
-one-line change and response parsing is consistent.
+Two providers are supported:
+  - Google Gemini (GEMINI_API_KEY / GOOGLE_API_KEY) via llm_gemini.GeminiClient
+  - Anthropic Claude (ANTHROPIC_API_KEY)
+If both keys are set, Gemini is used unless LLM_PROVIDER=anthropic.
+Every module goes through here so callers never care which one is active.
 """
 
 import logging
@@ -10,7 +13,14 @@ import os
 
 import anthropic
 
+from llm_gemini import GeminiAuthError, GeminiBusyError, GeminiClient
+
 log = logging.getLogger("kiaros.llm")
+
+# Exceptions that mean "the API key was rejected", for either provider.
+AUTH_ERRORS = (anthropic.AuthenticationError, GeminiAuthError)
+# Exceptions that mean "the provider is overloaded / rate limited — try again shortly".
+BUSY_ERRORS = (anthropic.RateLimitError, anthropic.InternalServerError, GeminiBusyError)
 
 # Fast model for the voice loop (low latency); deep model for research.
 FAST_MODEL = os.getenv("KIAROS_FAST_MODEL", "claude-haiku-5-5")
@@ -20,8 +30,66 @@ DEEP_MODEL = os.getenv("KIAROS_DEEP_MODEL", "claude-opus-5-5")
 FAST_EFFORT = os.getenv("KIAROS_FAST_EFFORT", "low")
 
 
-def make_client(api_key: str) -> anthropic.AsyncAnthropic:
+def gemini_key() -> str:
+    return (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+
+
+def anthropic_key() -> str:
+    return os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+
+def active_provider() -> str | None:
+    """'gemini', 'anthropic', or None when no key is configured."""
+    pref = os.getenv("LLM_PROVIDER", "").strip().lower()
+    have = {"gemini": bool(gemini_key()), "anthropic": bool(anthropic_key())}
+    if pref in have and have[pref]:
+        return pref
+    if have["gemini"]:
+        return "gemini"
+    if have["anthropic"]:
+        return "anthropic"
+    return None
+
+
+def make_client(api_key: str, provider: str = "anthropic"):
+    if provider == "gemini":
+        return GeminiClient(api_key)
     return anthropic.AsyncAnthropic(api_key=api_key)
+
+
+def client_from_env():
+    """A client for the active provider, or None if no key is set."""
+    provider = active_provider()
+    if provider == "gemini":
+        return GeminiClient(gemini_key())
+    if provider == "anthropic":
+        return anthropic.AsyncAnthropic(api_key=anthropic_key())
+    return None
+
+
+def provider_of(client) -> str:
+    return getattr(client, "provider", "anthropic") if client else ""
+
+
+def describe(client) -> str:
+    """Human-readable provider/model, e.g. 'Google Gemini (gemini-2.5-flash)'."""
+    if provider_of(client) == "gemini":
+        model = getattr(client, "fast_model", None)
+        return f"Google Gemini ({model})" if model else "Google Gemini"
+    if client:
+        return f"Anthropic Claude ({FAST_MODEL})"
+    return "not configured"
+
+
+async def warm_up(client) -> None:
+    """Find a working model before the user's first question (Gemini model discovery + fallback)."""
+    if provider_of(client) != "gemini":
+        return
+    try:
+        await fast_text(client, "Reply with the word ok.")
+        log.info(f"AI ready: {describe(client)}")
+    except Exception as e:
+        log.warning(f"AI warm-up failed: {e}")
 
 
 def text_of(response) -> str:

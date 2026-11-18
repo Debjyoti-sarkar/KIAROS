@@ -59,7 +59,7 @@ def open_page(browser, url: str, **ctx):
 def close_settings_if_open(page):
     """First run (no API key) opens Settings ~2s after load; close it like a user would."""
     try:
-        page.wait_for_selector("#settings-container.open", timeout=5000)
+        page.wait_for_selector("#settings-container.open", timeout=15000)
     except pw.TimeoutError:
         return  # already dismissed this session
     page.locator("#settings-close").click()
@@ -90,7 +90,8 @@ def test_laptop_first_run(browser, live_server):
     last_kiaros_caption(page, r"^Good (morning|afternoon|evening)")
     page.wait_for_selector(".kiaros-overlay.open", timeout=6000)
     assert page.locator("#settings-welcome").is_visible()
-    assert page.locator("#btn-test-anthropic-dot.status-red").count() == 1
+    assert page.locator("#status-ai.status-red").count() == 1  # no AI key yet
+    assert page.locator("#input-gemini-key").is_visible()
     page.locator("#settings-close").click()
     page.wait_for_timeout(400)
     assert not page.locator(".kiaros-overlay.open").count()
@@ -128,8 +129,8 @@ def _settings_save_flow(page):
     page.wait_for_selector(".kiaros-overlay.open")
     page.locator("#input-user-name").fill("Debjyoti")
     page.locator("#input-honorific").select_option("boss")
-    page.locator("#btn-save-prefs").click()
-    page.wait_for_timeout(800)
+    with page.expect_response(lambda r: r.url.endswith("/api/settings/preferences") and r.request.method == "POST"):
+        page.locator("#btn-save-prefs").click()
     page.reload()
     page.wait_for_selector("#conn-dot.conn-connected")
     page.wait_for_timeout(2500)
