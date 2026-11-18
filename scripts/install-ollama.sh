@@ -47,6 +47,8 @@ After=network-online.target
 ExecStart=$OLLAMA_BIN serve
 Environment=OLLAMA_HOST=127.0.0.1:11434
 Environment=OLLAMA_KEEP_ALIVE=30m
+Environment=OLLAMA_VULKAN=0
+Environment=GGML_VK_VISIBLE_DEVICES=
 Restart=on-failure
 RestartSec=3
 

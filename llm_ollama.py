@@ -145,15 +145,33 @@ class _Beta:
         self.messages = _Messages(client)
 
 
+def _options(max_tokens: int) -> dict:
+    opts = {"num_predict": min(max(max_tokens, 1), 2048), "num_ctx": 8192, "temperature": 0.4}
+    # Integrated laptop GPUs (Intel via Vulkan) are slower than the CPU and can crash
+    # mid-answer ("device lost"), so run on the CPU unless OLLAMA_GPU=1.
+    if os.getenv("OLLAMA_GPU", "0") != "1":
+        opts["num_gpu"] = 0
+    return opts
+
+
 class OllamaClient:
     provider = "ollama"
 
-    def __init__(self, url: str | None = None, model: str | None = None, timeout: float = 240.0):
+    def __init__(self, url: str | None = None, model: str | None = None, timeout: float = 420.0):
         self.url, self.model = url or OLLAMA_URL, model or OLLAMA_MODEL
         self.fast_model = self.deep_model = model
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=3.0))
         self.messages = _Messages(self)
         self.beta = _Beta(self)
+
+    async def prewarm(self, system: str, tools: list | None = None) -> None:
+        """Make the model read a fixed prompt now, so later requests that start with it reuse the cache."""
+        try:
+            t = time.time()
+            await self.chat([{"role": "user", "content": "ok"}], system, 1, tools or [])
+            log.info(f"Local model pre-loaded a {len(system) // 4}-token prompt in {time.time() - t:.0f}s")
+        except Exception as e:
+            log.warning(f"Local model pre-load failed: {e}")
 
     async def chat(self, messages: list, system: str, max_tokens: int, tools: list) -> _Response:
         body = {
@@ -161,7 +179,7 @@ class OllamaClient:
             "messages": _convert(messages, system),
             "stream": False,
             "keep_alive": "30m",
-            "options": {"num_predict": min(max(max_tokens, 256), 2048), "num_ctx": 8192, "temperature": 0.4},
+            "options": _options(max_tokens),
         }
         if _tools(tools):
             body["tools"] = _tools(tools)
@@ -213,6 +231,20 @@ class _FallbackBeta:
         self.messages = _FallbackMessages(owner, beta=True)
 
 
+def _recent(messages: list, n: int) -> list:
+    recent = list(messages[-n:])
+    while recent and recent[0].get("role") != "user":
+        recent.pop(0)
+    return recent or list(messages[-1:])
+
+
+def backup_of(client) -> "OllamaClient | None":
+    """The local model behind a client (the backup, or the client itself), if any."""
+    if isinstance(client, OllamaClient):
+        return client
+    return getattr(client, "backup", None) if isinstance(client, FallbackClient) else None
+
+
 class FallbackClient:
     """Use `primary` (cloud); on quota/overload/outage use `backup` (local) until the cloud should be back."""
 
@@ -253,6 +285,9 @@ class FallbackClient:
         backup_kw = {k: v for k, v in kw.items() if k in ("max_tokens", "messages", "system", "tools")}
         if backup_system:
             backup_kw["system"] = backup_system
+        if not backup_kw.get("tools"):
+            # Voice turns: a CPU model reads every token, so keep only the recent conversation.
+            backup_kw["messages"] = _recent(backup_kw.get("messages") or [], 6)
         # Server-side web search isn't available offline; the local model answers from what it knows.
         backup_kw["tools"] = [t for t in backup_kw.get("tools") or [] if isinstance(t, dict) and "input_schema" in t]
         resp = await self.backup.messages.create(**backup_kw)

@@ -133,3 +133,38 @@ def test_provider_selection_with_local_model(monkeypatch):
     monkeypatch.setattr(llm_ollama, "available", lambda *a, **k: False)
     monkeypatch.delenv("GEMINI_API_KEY")
     assert llm.active_provider() is None
+
+
+@pytest.mark.asyncio
+async def test_runs_on_cpu_and_prewarm(monkeypatch):
+    seen = []
+    c = local(seen)
+    await c.prewarm("FIXED PROMPT", [{"name": "t", "description": "", "input_schema": {"type": "object"}}])
+    assert seen[0]["options"]["num_gpu"] == 0                       # integrated GPUs crash / are slower
+    assert seen[0]["options"]["num_predict"] == 1 and seen[0]["messages"][0]["content"] == "FIXED PROMPT"
+    assert seen[0]["tools"][0]["function"]["name"] == "t"
+    monkeypatch.setenv("OLLAMA_GPU", "1")
+    await c.prewarm("x")
+    assert "num_gpu" not in seen[1]["options"]
+
+
+@pytest.mark.asyncio
+async def test_backup_gets_only_recent_voice_history():
+    seen = []
+    c = FallbackClient(FlakyCloud(httpx.ConnectError("offline")), local(seen))
+    history = []
+    for i in range(10):
+        history += [{"role": "user", "content": f"q{i}"}, {"role": "assistant", "content": f"a{i}"}]
+    history.append({"role": "user", "content": "latest"})
+    await llm.fast(c, history, system="cloud", backup_system="local")
+    sent = [m["content"] for m in seen[0]["messages"]]
+    assert sent[0] == "local" and sent[-1] == "latest" and len(sent) <= 7
+    assert seen[0]["messages"][1]["role"] == "user"
+    assert llm_ollama.backup_of(c) is c.backup and llm_ollama.backup_of(object()) is None
+
+
+@pytest.mark.asyncio
+async def test_prewarm_failure_is_harmless():
+    c = OllamaClient(url="http://ollama.test")
+    c._http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500, text="boom")))
+    await c.prewarm("x")  # logs, doesn't raise
