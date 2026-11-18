@@ -20,7 +20,8 @@ import time
 from pathlib import Path
 
 # Load .env file if present
-_env_path = Path(__file__).parent / ".env"
+from paths import DATA_DIR, ENV_FILE  # noqa: E402
+_env_path = ENV_FILE
 if _env_path.exists():
     for _line in _env_path.read_text().splitlines():
         _line = _line.strip()
@@ -84,7 +85,7 @@ HONORIFIC = os.getenv("HONORIFIC", "sir")
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 HTTP_PORT = int(os.getenv("KIAROS_PORT", "8340"))
 HTTPS_PORT = int(os.getenv("KIAROS_HTTPS_PORT", "8341"))
-REPORTS_DIR = Path(__file__).parent / "data" / "reports"
+REPORTS_DIR = DATA_DIR / "reports"
 
 KIAROS_SYSTEM_PROMPT = """\
 You are KIAROS — Knowledge-Integrated Autonomous Responsive Operating System — {user_name}'s personal AI assistant. You live on {user_name}'s Linux laptop and are reachable from their Android phone.
@@ -620,6 +621,57 @@ def extract_action(response: str) -> tuple[str, dict | None]:
 clients: dict[WebSocket, dict] = {}
 
 
+# One conversation shared by every device, persisted so it survives restarts.
+CONVO_FILE = DATA_DIR / "conversation.json"
+CONVO_KEEP = 60
+shared: dict = {"history": [], "summary": "", "last_response": "", "pending_confirm": None}
+
+
+def _load_conversation():
+    try:
+        data = json.loads(CONVO_FILE.read_text())
+        shared["history"] = [m for m in data.get("history", []) if m.get("role") in ("user", "assistant")][-CONVO_KEEP:]
+        shared["summary"] = data.get("summary", "")
+    except (OSError, ValueError):
+        pass
+
+
+def _save_conversation():
+    try:
+        shared["history"][:] = shared["history"][-CONVO_KEEP:]
+        CONVO_FILE.write_text(json.dumps({"history": shared["history"], "summary": shared["summary"]}))
+    except OSError as e:
+        log.debug(f"Conversation save failed: {e}")
+
+
+def add_turn(role: str, content: str, device: str = ""):
+    shared["history"].append({"role": role, "content": content, "device": device, "ts": time.time()})
+
+
+def devices_online() -> list[dict]:
+    return [{"device": i["device"], "platform": i["platform"]} for i in clients.values()]
+
+
+async def send_others(ws, payload: dict):
+    """Send to every connected device except ws (used to mirror the conversation)."""
+    for other in list(clients):
+        if other is ws:
+            continue
+        try:
+            await other.send_json(payload)
+        except Exception:
+            pass
+
+
+async def broadcast_presence():
+    payload = {"type": "presence", "devices": devices_online()}
+    for w in list(clients):
+        try:
+            await w.send_json(payload)
+        except Exception:
+            pass
+
+
 def device_of(ws) -> str:
     return clients.get(ws, {}).get("device", "laptop") if ws else "laptop"
 
@@ -651,8 +703,11 @@ async def send_device_action(ws, payload: dict) -> bool:
     return False
 
 
-async def speak(ws, text: str):
-    """Speak text on one client: Fish Audio if configured, else the device's own TTS."""
+async def speak(ws, text: str, sync: bool = True):
+    """Speak text on one device (Fish Audio, else the device's own TTS).
+
+    With sync=True the other devices get the same line as a silent caption.
+    """
     if ws is None or not text:
         return
     tts = strip_markdown_for_tts(text)
@@ -665,12 +720,14 @@ async def speak(ws, text: str):
             await ws.send_json({"type": "text", "text": tts, "speak": True})
     except Exception:
         pass  # client went away
+    if sync:
+        await send_others(ws, {"type": "sync", "role": "assistant", "text": tts, "device": device_of(ws)})
     log.info(f"KIAROS: {tts}")
 
 
 async def broadcast_speech(text: str):
     for ws in list(clients):
-        await speak(ws, text)
+        await speak(ws, text, sync=False)
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +1046,7 @@ async def generate_response(
     if last_response:
         system += f'\n\nYOUR LAST RESPONSE (do not repeat this):\n"{last_response[:150]}"'
 
-    messages = conversation_history[-20:]
+    messages = [{"role": m["role"], "content": m["content"]} for m in conversation_history[-20:]]
     if not messages or messages[-1].get("content") != text:
         messages = messages + [{"role": "user", "content": text}]
     # The API requires the first message to be from the user.
@@ -1021,11 +1078,14 @@ anthropic_client: Optional[anthropic.AsyncAnthropic] = None
 cached_projects: list[dict] = []
 recently_built: list[dict] = []  # [{"name": str, "path": str, "time": float}]
 dispatch_registry = DispatchRegistry()
+shared_work_session = WorkSession()
+shared_planner = TaskPlanner()
+shared_voice_state: dict = {"last_user_time": 0.0}
 qa_agent = QAAgent()
 success_tracker = SuccessTracker()
 
 # Usage tracking — logs every call with timestamp, persists to disk
-_USAGE_FILE = Path(__file__).parent / "data" / "usage_log.jsonl"
+_USAGE_FILE = DATA_DIR / "usage_log.jsonl"
 _session_start = time.time()
 _session_tokens = {"input": 0, "output": 0, "api_calls": 0, "tts_calls": 0}
 
@@ -1180,6 +1240,7 @@ async def lifespan(application: FastAPI):
     else:
         log.warning("ANTHROPIC_API_KEY not set — conversation disabled until you add it in settings")
     cached_projects = []
+    _load_conversation()
     _refresh_context_sync()
     refresher = asyncio.create_task(_refresh_context_async())
     log.info("KIAROS server starting")
@@ -1356,6 +1417,48 @@ def detect_system_command(text: str, device: str) -> dict | None:
         if name not in {"terminal", "claude", "claude code", "a terminal", "browser"} and "." not in name \
                 and system_control.find_app(name):
             return {"command": "open_app", "arg": name}
+    return None
+
+
+_NUMBER_RE = r"\+?\d[\d\s().-]{4,}\d"
+
+
+def _strip_filler(text: str) -> str:
+    t = text.strip().rstrip(".!?")
+    return re.sub(r"^(hey |ok |okay )?kiaros[,\s]*|^(please |can you |could you )", "", t, flags=re.I).strip()
+
+
+def detect_phone_command(text: str) -> dict | None:
+    """Instant contact/phone commands. Only fires for numbers and SAVED contacts,
+    so phrases like "call it a day" still go to the LLM."""
+    t = _strip_filler(text)
+
+    m = re.match(rf"^(?:save|add|store)\s+(?:contact\s+)?(.+?)(?:'s|s')?\s+(?:phone\s+)?(?:number|contact|mobile)\s+(?:as\s+|is\s+)?({_NUMBER_RE})$", t, re.I) \
+        or re.match(rf"^(?:save|add)\s+(?:contact\s+)?(.+?)\s+(?:as|with number|number|on)\s+({_NUMBER_RE})$", t, re.I)
+    if m:
+        return {"kind": "add_contact", "name": m.group(1).strip().title() if m.group(1).islower() else m.group(1).strip(),
+                "number": m.group(2)}
+
+    m = re.match(r"^(?:call|phone|dial|ring)\s+(.+)$", t, re.I)
+    if m:
+        target = re.sub(r"\s+(?:now|for me|please|on (?:my )?(?:phone|mobile))$", "", m.group(1).strip(), flags=re.I)
+        if re.fullmatch(_NUMBER_RE, target) or find_contact(target, exact=True):
+            return {"kind": "phone", "target": f"call ||| {target}"}
+        return None
+
+    m = re.match(r"^(text|message|sms|whatsapp)\s+(.+)$", t, re.I)
+    if m:
+        action = "whatsapp" if m.group(1).lower() == "whatsapp" else "sms"
+        rest = m.group(2).strip()
+        num = re.match(rf"^({_NUMBER_RE})(?:\s+(?:saying|that|:)?\s*(.*))?$", rest, re.I)
+        if num:
+            return {"kind": "phone", "target": f"{action} ||| {num.group(1)} ||| {num.group(2) or ''}"}
+        words = rest.split()
+        for n in range(min(3, len(words)), 0, -1):  # longest saved name first ("Mom", "Rahul Sharma")
+            name = " ".join(words[:n])
+            if find_contact(name, exact=True):
+                msg = re.sub(r"^(?:saying|that|:)\s*", "", " ".join(words[n:]), flags=re.I)
+                return {"kind": "phone", "target": f"{action} ||| {name} ||| {msg}"}
     return None
 
 
@@ -1547,48 +1650,52 @@ async def voice_handler(ws: WebSocket):
     """
     host = ws.client.host if ws.client else None
     if not auth.authorized(host, ws.headers, ws.query_params):
-        await ws.close(code=4401)
+        # Accept, then close with 4401: rejecting before accept shows up in browsers
+        # as a generic failure, and the app couldn't tell the user to pair.
+        await ws.accept()
+        await ws.close(code=4401, reason="pairing token required")
         log.warning(f"Rejected unauthenticated WebSocket from {host}")
         return
 
     await ws.accept()
     clients[ws] = {"device": "laptop" if auth.is_loopback(host) else "phone", "platform": "", "native": False, "host": host}
     task_manager.register_websocket(ws)
-    history: list[dict] = []
-    work_session = WorkSession()
-    planner = TaskPlanner()
-    session: dict = {"pending_confirm": None}
-    voice_state = {"last_user_time": 0.0}
-    last_kiaros_response = ""
-    session_summary = ""
-    summary_update_pending = False
-    messages_since_last_summary = 0
+    # One user, many devices: conversation, work session, planner and pending
+    # confirmations are shared, so you can start on the laptop and finish on the phone.
+    history: list[dict] = shared["history"]
+    work_session = shared_work_session
+    planner = shared_planner
+    session = shared
+    voice_state = shared_voice_state
 
     log.info(f"Voice WebSocket connected from {host}")
 
     async def finish(response_text: str, user_text: str):
-        """Record the turn, kick off background memory work, and speak."""
-        nonlocal last_kiaros_response, session_summary, summary_update_pending, messages_since_last_summary
-        history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": response_text})
+        """Record the turn, mirror it to other devices, kick off memory work, and speak."""
+        dev = device_of(ws)
+        add_turn("user", user_text, dev)
+        add_turn("assistant", response_text, dev)
+        _save_conversation()
 
-        messages_since_last_summary += 1
-        if messages_since_last_summary >= 5 and len(history) > 20 and not summary_update_pending and anthropic_client:
-            summary_update_pending = True
-            messages_since_last_summary = 0
-            rotated = history[:-20]
+        shared_voice_state["turns"] = shared_voice_state.get("turns", 0) + 1
+        if shared_voice_state["turns"] % 5 == 0 and len(history) > 20 and anthropic_client \
+                and not shared_voice_state.get("summarizing"):
+            shared_voice_state["summarizing"] = True
+            rotated = [{"role": m["role"], "content": m["content"]} for m in history[:-20]]
 
             async def _do_summary():
-                nonlocal session_summary, summary_update_pending
-                session_summary = await _update_session_summary(session_summary, rotated, anthropic_client)
-                summary_update_pending = False
+                try:
+                    shared["summary"] = await _update_session_summary(shared["summary"], rotated, anthropic_client)
+                    _save_conversation()
+                finally:
+                    shared_voice_state["summarizing"] = False
             asyncio.create_task(_do_summary())
 
         if anthropic_client and len(user_text) > 15:
             asyncio.create_task(extract_memories(user_text, response_text, anthropic_client))
 
         await speak(ws, response_text)
-        last_kiaros_response = response_text
+        shared["last_response"] = response_text
 
     try:
         # ── Greeting ──
@@ -1603,11 +1710,14 @@ async def voice_handler(ws: WebSocket):
 
             async def _greet():
                 await asyncio.sleep(0.8)  # let the client's hello arrive first
-                history.append({"role": "assistant", "content": greeting})
-                await speak(ws, greeting)
+                await speak(ws, greeting, sync=False)
             asyncio.create_task(_greet())
 
         await ws.send_json({"type": "status", "state": "idle"})
+        recent = [{"role": m["role"], "text": m["content"], "device": m.get("device", "")}
+                  for m in history[-8:] if not m["content"].startswith("[")]
+        await ws.send_json({"type": "history", "messages": recent})
+        await broadcast_presence()
 
         while True:
             raw = await ws.receive_text()
@@ -1624,6 +1734,7 @@ async def voice_handler(ws: WebSocket):
                 clients[ws]["platform"] = str(msg.get("platform", ""))[:40]
                 clients[ws]["native"] = bool(msg.get("native"))
                 log.info(f"Client identified: {clients[ws]}")
+                await broadcast_presence()
                 continue
 
             if mtype == "fix_self":
@@ -1641,6 +1752,7 @@ async def voice_handler(ws: WebSocket):
             voice_state["last_user_time"] = time.time()
             log.info(f"User ({device_of(ws)}): {user_text}")
             await ws.send_json({"type": "status", "state": "thinking"})
+            await send_others(ws, {"type": "sync", "role": "user", "text": user_text, "device": device_of(ws)})
 
             global cached_projects
             if not cached_projects:
@@ -1666,6 +1778,22 @@ async def voice_handler(ws: WebSocket):
                         await finish("Cancelled.", user_text)
                         continue
                     # Anything else: treat as a new request and drop the pending action.
+
+                # ── Instant phone / contact commands ──
+                phone_cmd = None if (planner.is_planning or work_session.active) else detect_phone_command(user_text)
+                if phone_cmd:
+                    if phone_cmd["kind"] == "add_contact":
+                        save_contact(phone_cmd["name"], phone_cmd["number"])
+                        response_text = f"Saved {phone_cmd['name']}."
+                    else:
+                        failure = await _execute_phone(phone_cmd["target"], ws)
+                        action, _, rest = phone_cmd["target"].partition("|||")
+                        who = rest.split("|||")[0].strip()
+                        verb = {"call": "Calling", "sms": "Texting", "whatsapp": "Opening WhatsApp for"}[action.strip()]
+                        where = "" if device_of(ws) == "phone" else " on your phone"
+                        response_text = failure or f"{verb} {who}{where}."
+                    await finish(response_text, user_text)
+                    continue
 
                 # ── Instant laptop controls ──
                 sys_cmd = None if (planner.is_planning or work_session.active) else detect_system_command(user_text, device_of(ws))
@@ -1790,7 +1918,7 @@ async def voice_handler(ws: WebSocket):
                     else:
                         response_text = await generate_response(
                             user_text, anthropic_client, task_manager, cached_projects, history,
-                            last_response=last_kiaros_response, session_summary=session_summary,
+                            last_response=shared["last_response"], session_summary=shared["summary"],
                             device_context=describe_devices(ws),
                         )
                         clean, embedded = extract_action(response_text)
@@ -1814,6 +1942,7 @@ async def voice_handler(ws: WebSocket):
     finally:
         task_manager.unregister_websocket(ws)
         clients.pop(ws, None)
+        await broadcast_presence()
 
 
 async def _dispatch_embedded_action(embedded: dict, ws, work_session: WorkSession, history: list,
@@ -1907,7 +2036,7 @@ async def _dispatch_embedded_action(embedded: dict, ws, work_session: WorkSessio
 # ---------------------------------------------------------------------------
 
 def _env_file_path() -> Path:
-    return Path(__file__).parent / ".env"
+    return ENV_FILE
 
 def _env_example_path() -> Path:
     return Path(__file__).parent / ".env.example"

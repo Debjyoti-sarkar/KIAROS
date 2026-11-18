@@ -620,3 +620,21 @@ html, body {
   #controls button { width: 40px; height: 40px; }
   #menu-dropdown { right: 16px; }
 }
+
+/* ---------------------------------------------------------------------------
+   Device presence + synced captions
+   --------------------------------------------------------------------------- */
+
+#devices { display: flex; gap: 6px; align-items: center; margin-right: 4px; }
+#devices .dev { color: rgba(255, 255, 255, 0.18); display: flex; transition: color 0.3s; }
+#devices .dev.online { color: rgba(34, 197, 94, 0.85); }
+#devices .dev.online.self { color: rgba(14, 165, 233, 0.9); }
+.caption-device {
+  display: inline-block;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-right: 6px;
+  vertical-align: 1px;
+}

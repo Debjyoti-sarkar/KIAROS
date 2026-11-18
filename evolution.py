@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+from paths import DATA_DIR, ENV_FILE  # noqa: F401
 
 log = logging.getLogger("kiaros.evolution")
 
 TEMPLATES_DIR = Path(__file__).parent / "templates" / "prompts"
-DB_PATH = Path(__file__).parent / "kiaros_data.db"
+DB_PATH = DATA_DIR / "kiaros_data.db"
 
 # Common failure patterns and their fixes
 FAILURE_PATTERNS = {

@@ -14,10 +14,11 @@ import json
 import logging
 import shutil
 from pathlib import Path
+from paths import DATA_DIR, ENV_FILE  # noqa: F401
 
 log = logging.getLogger("kiaros.work_mode")
 
-SESSION_FILE = Path(__file__).parent / "data" / "active_session.json"
+SESSION_FILE = DATA_DIR / "active_session.json"
 
 
 class WorkSession:

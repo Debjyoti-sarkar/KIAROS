@@ -11,10 +11,11 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from paths import DATA_DIR, ENV_FILE  # noqa: F401
 
 log = logging.getLogger("kiaros.learning")
 
-DB_PATH = Path(__file__).parent / "kiaros_data.db"
+DB_PATH = DATA_DIR / "kiaros_data.db"
 
 
 @dataclass

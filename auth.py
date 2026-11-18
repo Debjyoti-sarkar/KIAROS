@@ -10,8 +10,9 @@ import hmac
 import os
 import secrets
 from pathlib import Path
+from paths import DATA_DIR, ENV_FILE  # noqa: F401
 
-ENV_PATH = Path(__file__).parent / ".env"
+ENV_PATH = ENV_FILE
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 

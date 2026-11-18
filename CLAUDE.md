@@ -10,6 +10,7 @@ When a user opens this repo with Claude Code, help them:
 3. `.venv/bin/python server.py`, or `scripts/install-service.sh` for a systemd user service
 4. Open http://localhost:8340
 5. Phone: `scripts/build-apk.sh` → install `dist/KIAROS.apk`, pair via menu → Pair phone
+6. Tests: `.venv/bin/python -m pytest` (unit + end-user protocol flows + Playwright UI with system Chrome)
 
 ## Architecture
 - **Backend**: FastAPI (`server.py`). HTTP :8340 (laptop + app), HTTPS :8341 (phone browser) when cert.pem exists.
@@ -18,13 +19,14 @@ When a user opens this repo with Claude Code, help them:
 - **Laptop control**: `system_control.py`, an allowlisted command set (wpctl/pactl, MPRIS via gdbus, gtk-launch, GNOME ScreenSaver lock, systemctl power). Power actions need spoken confirmation (handled in `server.py` via `session["pending_confirm"]`).
 - **Desktop actions**: `actions.py` (terminal detection, xdg-open, Claude Code launch, project naming).
 - **Integrations**: `calendar_access.py` (ICS + recurring events), `mail_access.py` (IMAP EXAMINE/BODY.PEEK, read-only), `notes_access.py` (Markdown files, create-only), `screen.py` (screenshot tools + vision; window list only on X11).
-- **Memory**: `memory.py`, SQLite + FTS5 at `data/kiaros.db` (memories, tasks, notes, contacts).
+- **Memory**: `memory.py`, SQLite + FTS5 at `$KIAROS_DATA_DIR/kiaros.db` (memories, tasks, notes, contacts). All paths come from `paths.py`.
+- **Sync**: one shared conversation (`shared` in server.py, persisted to `data/conversation.json`), shared work session/planner/pending confirmation. Turns are mirrored to other devices as `sync` events; `presence` lists connected devices; `history` restores recent captions on connect.
 - **Frontend**: `frontend/src`. `config.ts` (server URL/token/device), `voice.ts` (web vs native speech, device TTS fallback), `main.ts` (state machine, device actions, captions), `settings.ts` (settings + pairing QR), `orb.ts` (Three.js).
 - **Android**: `frontend/android` (Capacitor 8). `androidScheme: "http"` + cleartext so the app can reach the LAN server.
 
 ## WebSocket protocol (`/ws/voice`)
 Client → server: `hello {device, platform, native}`, `transcript {text, isFinal}`, `fix_self`.
-Server → client: `audio {data, text}` (Fish MP3), `text {text, speak}` (device TTS), `status {state}`, `device_action {action: call|sms|whatsapp|navigate|open_url|alert, ...}`.
+Server → client: `audio {data, text}` (Fish MP3), `text {text, speak}` (device TTS), `status {state}`, `device_action {action: call|sms|whatsapp|navigate|open_url|alert, ...}`, `sync {role, text, device}`, `presence {devices}`, `history {messages}`.
 
 ## Action tags (LLM → server)
 `[ACTION:SYSTEM] cmd ||| arg`, `[ACTION:PHONE] call|sms|whatsapp|navigate|open_url ||| target ||| message`, `[ACTION:ADD_CONTACT] name ||| number`, `[ACTION:TIMER] seconds ||| label`, `[ACTION:BROWSE]`, `[ACTION:RESEARCH]`, `[ACTION:BUILD]`, `[ACTION:OPEN_TERMINAL]`, `[ACTION:PROMPT_PROJECT] name ||| prompt`, `[ACTION:SCREEN]`, `[ACTION:ADD_TASK]`, `[ACTION:COMPLETE_TASK]`, `[ACTION:ADD_NOTE]`, `[ACTION:CREATE_NOTE]`, `[ACTION:READ_NOTE]`, `[ACTION:REMEMBER]`. Executed in `_dispatch_embedded_action()`.
@@ -34,4 +36,4 @@ Server → client: `audio {data, text}` (Fish MP3), `text {text, speak}` (device
 - All speech goes through `speak(ws, text)`, which strips markdown and banned phrases and applies the honorific.
 - Never add arbitrary shell execution reachable from speech; extend the allowlist in `system_control.py` instead.
 - Mail stays read-only; notes are create-only.
-- The LICENSE (personal, non-commercial; attribution to the original JARVIS author) must stay intact.
+- LICENSE must stay intact (its copyright notice is required on every copy).

@@ -340,10 +340,14 @@ export async function openSettings() {
   welcome.style.display = status && !status.env_keys_set.anthropic ? "block" : "none";
 }
 
+const SETUP_DISMISSED = "kiaros.setupDismissed";
+
 export function closeSettings() {
   if (!panelEl || !isOpen) return;
   isOpen = false;
   hide(panelEl);
+  // Don't keep popping the first-run panel open on every reload once dismissed.
+  try { sessionStorage.setItem(SETUP_DISMISSED, "1"); } catch { /* ignore */ }
 }
 
 export function isSettingsOpen(): boolean {
@@ -403,8 +407,11 @@ export async function openPairing() {
 /** Auto-open settings on first run (no Anthropic key yet). */
 export async function checkFirstTimeSetup(): Promise<boolean> {
   try {
+    if (sessionStorage.getItem(SETUP_DISMISSED)) return false;
+  } catch { /* ignore */ }
+  try {
     const status = await apiGet<StatusResponse>("/api/settings/status");
-    if (!status.env_keys_set.anthropic) {
+    if (!status.env_keys_set.anthropic && !document.querySelector(".kiaros-overlay.open")) {
       openSettings();
       return true;
     }
