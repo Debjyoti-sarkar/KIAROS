@@ -1,0 +1,50 @@
+# Environment
+.env
+.env.local
+
+# Dependencies
+node_modules/
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Data (user-specific, generated at runtime)
+*.db
+data/*.jsonl
+data/active_session.json
+data/.kiaros_output.txt
+
+# Certificates
+*.pem
+
+# Build
+dist/
+.vite/
+frontend/.vite/
+
+# IDE / System
+.DS_Store
+.vscode/
+.idea/
+.claude/
+.arch/
+
+
+
+context/
+*.db-shm
+*.db-wal
+
+# KIAROS runtime output
+data/reports/
+
+# Android
+*.apk
+*.aab
+*.keystore
+*.jks

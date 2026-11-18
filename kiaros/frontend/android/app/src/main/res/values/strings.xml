@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">KIAROS</string>
+    <string name="title_activity_main">KIAROS</string>
+    <string name="package_name">com.kiaros.app</string>
+    <string name="custom_url_scheme">com.kiaros.app</string>
+</resources>
