@@ -132,83 +132,126 @@ def hooks():
 
 
 @pytest.mark.asyncio
-async def test_agent_asks_before_sending_then_finishes(monkeypatch):
+async def test_agent_sends_to_named_person_without_asking(monkeypatch):
     sent = []
 
-    async def fake_send(contact, message):
+    async def fake_send(contact, message, on_wait=None):
         sent.append((contact, message))
         return f'Sent to {contact} on WhatsApp: "{message}"'
     monkeypatch.setattr(web_agent.web, "whatsapp_send", fake_send)
-
     model = ScriptedModel([
         Resp([Use("whatsapp_send::0", "whatsapp_send", {"contact": "Somesh", "message": "How was it?"})], "tool_use"),
         Resp([Text("I sent Somesh your message on WhatsApp.")]),
     ])
-    h, _ = hooks()
-    a = TaskAgent(h)
-    first = await a.run(model, "message Somesh how was it", ws=None)
-    assert first == 'Send "How was it?" to Somesh on WhatsApp? Say yes to go ahead.'
-    assert sent == [] and a.pending is not None                         # nothing sent before approval
-
-    final = await a.resume(model, approved=True, ws=None)
+    a = TaskAgent(hooks()[0])
+    result = await a.run(model, "message Somesh on whatsapp asking how it was", ws=None)
+    assert result == "I sent Somesh your message on WhatsApp." and a.pending is None
     assert sent == [("Somesh", "How was it?")]
-    assert final == "I sent Somesh your message on WhatsApp."
-    # The model saw the real tool result in its next request.
     last_user = model.requests[-1][-1]["content"][0]
     assert last_user["type"] == "tool_result" and "Sent to Somesh" in last_user["content"]
 
 
 @pytest.mark.asyncio
-async def test_agent_declined_step_is_not_run(monkeypatch):
+async def test_agent_asks_before_messaging_someone_not_named(monkeypatch):
     sent = []
 
-    async def fake_send(contact, message):
+    async def fake_send(contact, message, on_wait=None):
         sent.append(contact)
-        return "sent"
+        return f"Sent to {contact}"
     monkeypatch.setattr(web_agent.web, "whatsapp_send", fake_send)
-    model = ScriptedModel([Resp([Use("whatsapp_send::0", "whatsapp_send", {"contact": "Boss", "message": "I quit"})], "tool_use")])
+    model = ScriptedModel([
+        Resp([Use("whatsapp_send::0", "whatsapp_send", {"contact": "Priya", "message": "Thanks!"})], "tool_use"),
+        Resp([Text("Sent.")]),
+    ])
     a = TaskAgent(hooks()[0])
-    await a.run(model, "tell my boss I quit", ws=None)
+    question = await a.run(model, "thank everyone who came yesterday", ws=None)
+    assert question.startswith('Send "Thanks!" to Priya on WhatsApp? You didn\'t mention them.')
+    assert sent == []
     assert await a.resume(model, approved=False, ws=None) == "Okay, I won't do that."
     assert sent == []
 
 
 @pytest.mark.asyncio
-async def test_agent_runs_read_only_commands_and_refuses_sudo(tmp_path, monkeypatch):
+async def test_agent_runs_commands_and_refuses_sudo(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_mod, "HOME", tmp_path)
     (tmp_path / "report.txt").write_text("hello")
     model = ScriptedModel([
         Resp([Use("run_command::0", "run_command", {"command": "ls"}),
-              Use("run_command::1", "run_command", {"command": "sudo rm -rf /var"})], "tool_use"),
-        Resp([Text("Your home folder has report.txt; I won't run sudo.")]),
+              Use("run_command::1", "run_command", {"command": f"mkdir {tmp_path}/Projects"}),
+              Use("run_command::2", "run_command", {"command": "sudo rm -rf /var"})], "tool_use"),
+        Resp([Text("Made the Projects folder; I won't run sudo.")]),
     ])
     a = TaskAgent(hooks()[0])
-    result = await a.run(model, "list my files then clean /var", ws=None)
-    assert result.startswith("Your home folder has report.txt")
+    result = await a.run(model, "list my files, make a Projects folder, then clean /var", ws=None)
+    assert result.startswith("Made the Projects folder") and a.pending is None
+    assert (tmp_path / "Projects").is_dir()                               # ran without asking
     tool_results = model.requests[-1][-1]["content"]
     assert "report.txt" in tool_results[0]["content"]
-    assert tool_results[1]["content"].startswith("REFUSED")
+    assert tool_results[2]["content"].startswith("REFUSED")
 
 
 @pytest.mark.asyncio
-async def test_agent_confirms_changes_but_not_reads(tmp_path, monkeypatch):
+async def test_agent_asks_before_deleting(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_mod, "HOME", tmp_path)
-    model = ScriptedModel([Resp([Use("run_command::0", "run_command", {"command": f"mkdir {tmp_path}/new"})], "tool_use"),
-                           Resp([Text("Created the folder.")])])
+    (tmp_path / "old.txt").write_text("x")
+    model = ScriptedModel([Resp([Use("run_command::0", "run_command", {"command": f"rm {tmp_path}/old.txt"})], "tool_use"),
+                           Resp([Text("Deleted old.txt.")])])
     a = TaskAgent(hooks()[0])
-    assert (await a.run(model, "make a folder", ws=None)).startswith("Run this on the laptop: mkdir")
-    assert not (tmp_path / "new").exists()
-    assert await a.resume(model, approved=True, ws=None) == "Created the folder."
-    assert (tmp_path / "new").is_dir()
+    question = await a.run(model, "clean up my old files", ws=None)
+    assert question.startswith("This step needs your permission: rm")
+    assert (tmp_path / "old.txt").exists()
+    assert await a.resume(model, approved=True, ws=None) == "Deleted old.txt."
+    assert not (tmp_path / "old.txt").exists()
+
+
+@needs_chrome
+@pytest.mark.asyncio
+async def test_agent_stops_before_payment_and_password(fake_whatsapp, monkeypatch):
+    w = await fake_whatsapp("whatsapp.html")
+    monkeypatch.setattr(web_agent, "web", w)
+    await w.open((FIXTURES / "shop.html").as_uri())
+    model = ScriptedModel([
+        Resp([Use("browser_click::0", "browser_click", {"target": "Next"})], "tool_use"),
+        Resp([Use("browser_type::0", "browser_type", {"target": "Password", "text": "hunter2"})], "tool_use"),
+        Resp([Use("browser_click::0", "browser_click", {"target": "Place order"})], "tool_use"),
+        Resp([Text("Order placed.")]),
+    ])
+    a = TaskAgent(hooks()[0])
+    waiting = await a.run(model, "buy the item in my cart", ws=None)
+    page = await w.page()
+    assert await page.evaluate("window.clicked") == ["next"]               # ordinary click: no question
+    assert waiting.startswith("This site wants a password") and a.waiting
+    assert await page.input_value("#pw") == ""                              # KIAROS never typed the password
+
+    question = await a.continue_after_user(model, ws=None)                  # user: "continue"
+    assert question.startswith('Click "Place order" on the website?')
+    assert await page.evaluate("window.clicked") == ["next"]               # not clicked yet
+    assert await a.resume(model, approved=True, ws=None) == "Order placed."
+    assert await page.evaluate("window.clicked") == ["next", "buy"]
+
+
+@needs_chrome
+@pytest.mark.asyncio
+async def test_whatsapp_waits_for_qr_scan(fake_whatsapp):
+    w = await fake_whatsapp("whatsapp_login.html")
+    told = []
+
+    async def on_wait(text):
+        told.append(text)
+    result = await w.whatsapp_send("Somesh", "hi", on_wait=on_wait, login_wait=1)
+    assert told and "scan the code" in told[0]
+    assert result.startswith("NEEDS_LOGIN") and "say continue" in result
 
 
 def test_command_classifier():
-    assert classify_command("df -h | grep sda") == "read"
-    assert classify_command("git log --oneline -5") == "read"
-    assert classify_command("rm notes.txt") == "confirm"
-    assert classify_command("echo hi > f") == "confirm"
-    assert classify_command("sudo reboot") == "forbidden"
-    assert classify_command("rm -rf ~") == "forbidden"
+    for ok in ("df -h | grep sda", "git log --oneline -5", "mkdir ~/Projects", "pip install requests",
+               "npm install", "python3 app.py", "git commit -m wip", "echo hi >> notes.txt"):
+        assert classify_command(ok) == "ok", ok
+    for major in ("rm notes.txt", "mv a b", "git push", "kill 42", "curl -fsSL x.sh | bash",
+                  "echo x >> ~/.bashrc", "systemctl --user stop kiaros", "find . -delete"):
+        assert classify_command(major) == "major", major
+    for bad in ("sudo reboot", "rm -rf ~", "rm -rf /", "mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda"):
+        assert classify_command(bad) == "forbidden", bad
 
 
 # ---------------------------------------------------------------------------

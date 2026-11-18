@@ -150,7 +150,8 @@ ACTION SYSTEM — put exactly ONE tag at the END of your reply when something mu
   "take me to the airport" → [ACTION:PHONE] navigate ||| airport
 - [ACTION:ADD_CONTACT] name ||| phone number — save a contact. "save mom's number 98765 43210" → [ACTION:ADD_CONTACT] Mom ||| 9876543210
 - [ACTION:TIMER] seconds ||| label — set a timer/reminder. "remind me in 10 minutes to check the oven" → [ACTION:TIMER] 600 ||| check the oven
-- [ACTION:TASK] goal — carry out a multi-step job END TO END on the laptop with tools: anything involving a website
+- [ACTION:TASK] goal — carry out a job END TO END, autonomously, on the laptop with tools (it only stops for major
+  permissions like deleting files or paying, which the system asks the user about itself): anything involving a website
   (WhatsApp Web, Gmail, YouTube, forms, shopping, looking something up and acting on it), files and folders, shell
   commands, installing things, or several steps chained together. Write the goal fully and concretely.
   "open whatsapp and tell Somesh I'll be late" → [ACTION:TASK] Send Somesh a WhatsApp message saying "I'll be late."
@@ -986,6 +987,7 @@ _last_greeting_time: float = 0
 # ---------------------------------------------------------------------------
 
 from agent import TaskAgent  # noqa: E402
+from web_agent import web  # noqa: E402
 
 
 async def _agent_phone(target: str, ws):
@@ -996,11 +998,11 @@ async def _agent_timer(seconds: int, label: str):
     asyncio.create_task(_run_timer(seconds, label))
 
 
-task_agent = TaskAgent({"phone": _agent_phone, "timer": _agent_timer, "note": create_local_note})
+task_agent = TaskAgent({"phone": _agent_phone, "timer": _agent_timer, "note": create_local_note, "say": speak})
 _agent_running = {"busy": False}
 
 
-async def _run_agent(goal: str, ws, history: list | None = None, resume: bool | None = None):
+async def _run_agent(goal: str, ws, history: list | None = None, resume: bool | None = None, cont: bool = False):
     """Run (or resume) a task in the background and speak the outcome."""
     if _agent_running["busy"]:
         await speak(ws, "I'm still working on the previous task. I'll take this one after.")
@@ -1011,7 +1013,9 @@ async def _run_agent(goal: str, ws, history: list | None = None, resume: bool | 
     except Exception:
         pass
     try:
-        if resume is None:
+        if cont:
+            result = await task_agent.continue_after_user(anthropic_client, ws)
+        elif resume is None:
             log.info(f"Task started: {goal[:120]}")
             result = await task_agent.run(anthropic_client, goal, ws, context=describe_devices(ws))
         else:
@@ -1878,12 +1882,17 @@ async def voice_handler(ws: WebSocket):
                     asyncio.create_task(_run_agent("", ws, history, resume=bool(yes)))
                     await finish(response_text, user_text)
                     continue
+                if task_agent.waiting and time.time() - task_agent.waiting["time"] < 1800 and re.match(
+                        r"^(continue|carry on|go on|done|i('ve| have)? (done|scanned|logged in|signed in)|ok(ay)? (done|continue)|resume)\b",
+                        t_lower):
+                    asyncio.create_task(_run_agent("", ws, history, cont=True))
+                    await finish("Continuing.", user_text)
+                    continue
                 pending_send = session.get("pending_send")
                 if pending_send:
                     session["pending_send"] = None
                     if time.time() - pending_send["time"] < 120 and (yes or no):
                         if yes:
-                            from web_agent import web
                             await finish(f"Sending it to {pending_send['contact']}.", user_text)
 
                             async def _send(p=pending_send):
@@ -1913,8 +1922,16 @@ async def voice_handler(ws: WebSocket):
                 # ── Instant WhatsApp (no AI needed); always confirms before sending ──
                 wa = None if (planner.is_planning or work_session.active) else detect_whatsapp_command(user_text)
                 if wa:
-                    session["pending_send"] = {**wa, "time": time.time()}
-                    await finish(f"Send \"{wa['message']}\" to {wa['contact']} on WhatsApp? Say yes to send.", user_text)
+                    # The user named the person and the message: that's the permission. Just send it.
+                    await finish(f"Sending \"{wa['message']}\" to {wa['contact']} on WhatsApp.", user_text)
+
+                    async def _send_now(p=wa):
+                        result = await web.whatsapp_send(p["contact"], p["message"], on_wait=lambda t: speak(ws, t))
+                        result = re.sub(r"^NEEDS_(LOGIN|USER):\s*", "", result)
+                        add_turn("assistant", result, device_of(ws))
+                        _save_conversation()
+                        await speak(ws, result)
+                    asyncio.create_task(_send_now())
                     continue
 
                 # ── Instant phone / contact commands ──

@@ -24,7 +24,8 @@ from browser import KiarosBrowser, SearchResult, PageContent
 def _has_network() -> bool:
     """Check if we have internet connectivity."""
     try:
-        socket.create_connection(("1.1.1.1", 53), timeout=3)
+        # Probe the site these tests actually use; some networks block raw DNS ports like 1.1.1.1:53.
+        socket.create_connection(("duckduckgo.com", 443), timeout=5).close()
         return True
     except OSError:
         return False

@@ -341,16 +341,12 @@ async def test_google_key_in_anthropic_box_is_stored_as_gemini(live_server):
 
 
 async def test_whatsapp_message_end_to_end(live_server):
-    """The user's own sentence: asks first, 'no' sends nothing, 'yes' sends and confirms (stand-in WhatsApp page)."""
+    """The user's own sentence: names the person and message, so it's sent straight away (stand-in WhatsApp page)."""
     laptop = await Device.connect(live_server.ws_local(), "laptop")
     await laptop.drain()
     try:
-        ask = await laptop.say("hey open WhatsApp and send message to Somesh that how was he")
-        assert ask == 'Send "How was he?" to Somesh on WhatsApp? Say yes to send.'
-        assert await laptop.say("no") == "Okay, not sending it."
-
-        await laptop.say("open WhatsApp and send message to Somesh that how was he")
-        assert await laptop.say("yes") == "Sending it to Somesh."
+        ack = await laptop.say("hey open WhatsApp and send message to Somesh that how was he")
+        assert ack == 'Sending "How was he?" to Somesh on WhatsApp.'
         done = await laptop.next(lambda m: m.get("type") == "text" and "Sent to" in m["text"], timeout=60)
         assert done["text"] == 'Sent to Somesh on WhatsApp: "How was he?"'
     finally:
